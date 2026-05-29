@@ -557,3 +557,23 @@ Normal workflow:
 
 Why:
 The user is an end user, not a data provider. The product must not depend on manual entry of economic actual/forecast values.
+
+
+## v2.16.1 - Stable Smart Analysis
+
+This version fixes the white-page issue caused by the experimental Guided/Advanced tab hiding in v2.16.
+
+Safe changes:
+- Adds One-click Smart Analysis in Control Center.
+- Keeps all tabs visible for stability.
+- Does not use dynamic tab hiding.
+- Build validated successfully.
+
+Run Smart Analysis:
+1. Loads/repairs official calendar.
+2. Refreshes FRED with cache/rate guards.
+3. Refreshes GDELT with rate guards.
+4. Runs event replay for recent completed high-impact events if available.
+5. Opens Scenario Lab.
+
+Use this version instead of v2.16.

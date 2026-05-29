@@ -1,12 +1,12 @@
 @echo off
 setlocal EnableExtensions
-title GoldScope v2.15 - Market Reaction First
+title GoldScope v2.16.1 - Stable Smart Analysis
 color 0A
 
 set LOG=%~dp0goldscope-v2-run.log
 
 echo ============================================================
-echo GoldScope v2.15 - Market Reaction First
+echo GoldScope v2.16.1 - Stable Smart Analysis
 echo ============================================================
 echo.
 echo Log:

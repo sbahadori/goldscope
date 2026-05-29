@@ -1333,7 +1333,7 @@ function buildAnalysisForMoves(event, moves) {
   return analyzePostEventReaction(event, record);
 }
 
-function buildReplayRecord(event, seriesMap, windowLabel = "market reaction first workflow fixed") {
+function buildReplayRecord(event, seriesMap, windowLabel = "stable smart analysis workflow fixed") {
   const eventMs = eventTimeToTimestamp(event);
   const identity = buildEventIdentity(event);
 
@@ -1551,7 +1551,7 @@ async function reconstructEventFromHistory(event) {
     eventIdentity: identity,
     category: event.category,
     source: "event replay / per-point historical reconstruction",
-    window: "market reaction first workflow fixed",
+    window: "stable smart analysis workflow fixed",
     actual: event.actual || "",
     forecast: event.forecast || "",
 
@@ -2001,6 +2001,7 @@ function TradingViewChart() {
 export default function App() {
   const [settings, setSettings] = useStoredSettings();
   const [tab, setTab] = useState("control");
+  const [smartRunStatus, setSmartRunStatus] = useState("ready");
   const [news, setNews] = useState(MOCK_NEWS);
   const [fredRows, setFredRows] = useState(MOCK_FRED);
   const [calendarEvents, setCalendarEvents] = useState(() => {
@@ -4332,6 +4333,31 @@ export default function App() {
       .filter((e) => eventTimeToTimestamp(e) + 60 * 60000 <= Date.now())
       .sort((a, b) => eventTimeToTimestamp(b) - eventTimeToTimestamp(a));
 
+    async function runSmartAnalysis() {
+      setSmartRunStatus("running");
+      setControlStatus("Smart Analysis: loading official calendar...");
+      await loadGeneratedOfficialCalendar();
+
+      setControlStatus("Smart Analysis: refreshing FRED macro data...");
+      try { await refreshFred(); } catch {}
+
+      setControlStatus("Smart Analysis: refreshing GDELT news...");
+      try { await refreshGdelt(); } catch {}
+
+      const readyEvents = calendarUniverse
+        .filter((e) => isHighImpactEvent(e))
+        .filter((e) => eventTimeToTimestamp(e) + 60 * 60000 <= Date.now());
+
+      if (readyEvents.length) {
+        setControlStatus("Smart Analysis: reconstructing recent event reactions...");
+        await replayRecentCompletedEvents(5);
+      }
+
+      setControlStatus("Smart Analysis finished. Review Scenario Lab.");
+      setSmartRunStatus("finished");
+      setTab("scenarioLab");
+    }
+
     async function runDailyRefresh() {
       setControlStatus("loading official calendar...");
       await loadGeneratedOfficialCalendar();
@@ -4400,8 +4426,26 @@ export default function App() {
           <Card style={{ background: "#102016", borderColor: "#166534", marginBottom: 14 }}>
             <b style={{ color: C.green }}>Simplified workflow:</b>{" "}
             <span style={{ color: C.muted }}>
-              Most days you only need: Run Daily Refresh → Check Scenario Lab. After a major event passes: Run Post-Event Update. Event Results is optional only.
+              Most days you only need one button: Run Smart Analysis. Event Results is optional only.
             </span>
+          </Card>
+
+          <Card style={{ background: C.card2, borderColor: `${C.gold}66`, marginBottom: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+              <div>
+                <h2 style={{ margin: "0 0 6px", color: C.gold }}>One-click Smart Analysis</h2>
+                <p style={{ color: C.muted, lineHeight: 1.6, margin: 0 }}>
+                  Loads calendar, refreshes FRED/GDELT, reconstructs recent completed event reactions if available, then opens Scenario Lab.
+                </p>
+              </div>
+              <button onClick={runSmartAnalysis} style={{ ...btn(false), fontSize: 16, padding: "14px 18px" }}>
+                Run Smart Analysis
+              </button>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+              <Badge value={smartRunStatus === "finished" ? "supportive" : smartRunStatus === "running" ? "warning" : "blue"}>smart: {smartRunStatus}</Badge>
+              <Badge value="supportive">stable mode</Badge>
+            </div>
           </Card>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 14 }}>
@@ -4416,7 +4460,7 @@ export default function App() {
             <StepCard
               number="1"
               title="Daily research refresh"
-              desc="Loads the official calendar file, refreshes FRED using cache rules, and refreshes GDELT news if rate limits allow. You do not need to manually open Macro Calendar first."
+              desc="Optional manual shortcut. Smart Analysis already does this for you."
               action={runDailyRefresh}
               button="Run daily refresh"
               secondary={<button onClick={() => setTab("scenarioLab")} style={btn(false)}>Open Scenario Lab</button>}
@@ -4434,7 +4478,7 @@ export default function App() {
             <StepCard
               number="3"
               title="After a major event"
-              desc="Run market-reaction replay. It does not require you to manually enter actual/forecast values. Event Results is optional enrichment only."
+              desc="Optional manual shortcut. Smart Analysis runs this automatically if completed events are replay-ready."
               action={runPostEventUpdate}
               button="Run post-event update"
               secondary={<button onClick={() => setTab("eventResults")} style={btn(false)}>Optional enrichment</button>}
@@ -4489,13 +4533,14 @@ export default function App() {
             <Title icon="⚙️" title="Advanced tabs" sub="You usually do not need these every day." />
             <p style={{ color: C.muted, lineHeight: 1.7 }}>
               Macro Calendar is mainly for checking dates. Event Results is optional enrichment, not a required step. Auto Tracker is optional/experimental.
-              The normal workflow should start here, in Control Center.
+              For now all tabs remain visible for stability, but the normal workflow should start here, in Control Center.
             </p>
           </Card>
 
           <Card>
             <Title icon="📌" title="Control status" sub="Last orchestration message." />
             <p style={{ color: C.muted, lineHeight: 1.7 }}>{controlStatus}</p>
+            <Badge value={smartRunStatus === "finished" ? "supportive" : smartRunStatus === "running" ? "warning" : "blue"}>smart analysis: {smartRunStatus}</Badge>
           </Card>
         </div>
       </div>
@@ -4519,7 +4564,7 @@ export default function App() {
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.15",
+        appVersion: "GoldScope v2.16.1",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -4722,7 +4767,7 @@ export default function App() {
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.15",
+        appVersion: "GoldScope v2.16.1",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -5007,14 +5052,14 @@ export default function App() {
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.15</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.16.1</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
               <Badge value={bias.color === C.green ? "bullish" : bias.color === C.red ? "bearish" : "warning"}>{bias.label.replace("Research bias: ", "")}</Badge>
             </div>
             <p style={{ color: C.muted, margin: "7px 0 0", fontSize: 13 }}>
-              XAUUSD research terminal · TradingView chart · GDELT news · stable FRED macro drivers · market reaction first workflow fixed · no broker connection · no auto-trading
+              XAUUSD research terminal · TradingView chart · GDELT news · stable FRED macro drivers · stable smart analysis workflow fixed · no broker connection · no auto-trading
             </p>
           </div>
           <div className="layout-note" style={{ display: "flex", gap: 8 }}>
