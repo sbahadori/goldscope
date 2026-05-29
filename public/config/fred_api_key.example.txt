@@ -1,0 +1,4 @@
+# Copy this file to fred_api_key.txt locally.
+# Put your real FRED API key in fred_api_key.txt.
+# Never commit fred_api_key.txt to GitHub.
+PASTE_YOUR_FRED_API_KEY_HERE

@@ -1,12 +1,12 @@
 @echo off
 setlocal EnableExtensions
-title GoldScope v2.1 - FRED Key File
+title GoldScope v2.14.1 - Calendar Replay Fix
 color 0A
 
 set LOG=%~dp0goldscope-v2-run.log
 
 echo ============================================================
-echo GoldScope v2.1 - FRED Key File
+echo GoldScope v2.14.1 - Calendar Replay Fix
 echo ============================================================
 echo.
 echo Log:
@@ -78,7 +78,16 @@ if not exist node_modules (
 )
 
 echo.
-echo Starting GoldScope v2 at:
+echo Updating official macro calendar...
+call npm run update:calendar
+if errorlevel 1 (
+  echo.
+  echo [WARNING] Calendar update failed. The app will still start using existing/embedded calendar data.
+  echo.
+)
+
+echo.
+echo Starting GoldScope v2.5 at:
 echo   http://localhost:3000/
 echo.
 echo Keep this window open.
