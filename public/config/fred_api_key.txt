@@ -1,0 +1,5 @@
+# Put your FRED API key on the next line.
+# Do not wrap it in quotes.
+# Example:
+# abcdef1234567890abcdef1234567890
+06da89f1726c699f1472b1525cd0b64e
