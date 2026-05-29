@@ -1333,7 +1333,7 @@ function buildAnalysisForMoves(event, moves) {
   return analyzePostEventReaction(event, record);
 }
 
-function buildReplayRecord(event, seriesMap, windowLabel = "calendar and replay evidence fix fixed") {
+function buildReplayRecord(event, seriesMap, windowLabel = "market reaction first workflow fixed") {
   const eventMs = eventTimeToTimestamp(event);
   const identity = buildEventIdentity(event);
 
@@ -1551,7 +1551,7 @@ async function reconstructEventFromHistory(event) {
     eventIdentity: identity,
     category: event.category,
     source: "event replay / per-point historical reconstruction",
-    window: "calendar and replay evidence fix fixed",
+    window: "market reaction first workflow fixed",
     actual: event.actual || "",
     forecast: event.forecast || "",
 
@@ -2388,6 +2388,7 @@ export default function App() {
         score: confidenceScore,
         label: confidenceLabel,
         reason: confidenceReason,
+        evidenceMode: replaySignal?.missingReplay ? "replay missing" : "market-reaction first",
       },
       scores: { bullishScore, bearishScore, waitScore },
       macroDirection,
@@ -2741,7 +2742,7 @@ export default function App() {
     ["macro", "FRED Macro Drivers"],
     ["calendar", "Macro Calendar"],
     ["eventRisk", "Event Risk"],
-    ["eventResults", "Event Results"],
+    ["eventResults", "Event Results (Optional)"],
     ["eventReplay", "Event Replay"],
     ["autoPostEvent", "Auto Tracker (Optional)"],
     ["postEvent", "Post-Event Tracker"],
@@ -3267,12 +3268,12 @@ export default function App() {
     return (
       <div style={{ display: "grid", gridTemplateColumns: "1fr .85fr", gap: 16 }}>
         <Card>
-          <Title icon="🧾" title="Event Results Center" sub="Manage actual, forecast and previous values for macro events before running replay analysis." />
+          <Title icon="🧾" title="Optional Event Results Enrichment" sub="Optional enrichment for actual, forecast and previous values. Not required for replay." />
 
           <Card style={{ background: "#171008", borderColor: "#92400e", marginBottom: 14 }}>
-            <b style={{ color: C.gold }}>Why this matters:</b>{" "}
+            <b style={{ color: C.gold }}>Optional only:</b>{" "}
             <span style={{ color: C.muted }}>
-              Event Replay can reconstruct market reaction, but interpretation is stronger when actual/forecast/previous values are attached to the event.
+              You do not need to fill this manually. Event Replay works from market reaction data. This page is only for optional enrichment if official actual/forecast data is available later.
             </span>
           </Card>
 
@@ -3301,7 +3302,7 @@ export default function App() {
                 </div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <Badge value={selected.importance === "Critical" ? "negative" : selected.importance === "High" ? "warning" : "blue"}>{selected.importance}</Badge>
-                  <Badge value={saved?.actual ? "supportive" : "warning"}>{saved?.actual ? "result saved" : "missing result"}</Badge>
+                  <Badge value={saved?.actual ? "supportive" : "warning"}>{saved?.actual ? "result saved" : "optional result missing"}</Badge>
                 </div>
               </div>
               <p style={{ color: C.muted, lineHeight: 1.55 }}>{selected.expectedImpact}</p>
@@ -3344,21 +3345,21 @@ export default function App() {
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
             <button onClick={saveSelected} style={btn(false)}>Save event result</button>
-            <button onClick={applyToReplay} style={btn(false)}>Save + use for next replay</button>
+            <button onClick={applyToReplay} style={btn(false)}>Save optional result</button>
             {selected && <button onClick={() => clearEventResult(selected.id)} style={btn(false)}>Clear selected result</button>}
           </div>
         </Card>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <Card>
-            <Title icon="⚠️" title="Completed Events Missing Results" sub="Passed events that should be enriched before replay." />
+            <Title icon="⚠️" title="Optional Missing Result Enrichment" sub="Passed events that can be enriched later, but replay does not depend on this." />
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {completedWithMissingResults.length === 0 && <p style={{ color: C.muted }}>No completed high-impact event is missing actual values.</p>}
               {completedWithMissingResults.map((e) => (
                 <Card key={e.id} style={{ background: C.card2 }}>
                   <b>{e.name}</b>
                   <div style={{ color: C.muted, fontSize: 12 }}>{e.date} · {e.time} · {e.category}</div>
-                  <button onClick={() => setSelectedId(e.id)} style={{ ...btn(false), marginTop: 8 }}>Fill result</button>
+                  <button onClick={() => setSelectedId(e.id)} style={{ ...btn(false), marginTop: 8 }}>Optional fill</button>
                 </Card>
               ))}
             </div>
@@ -4345,14 +4346,9 @@ export default function App() {
     }
 
     async function runPostEventUpdate() {
-      if (completedMissingResults.length) {
-        setControlStatus("some completed events are missing actual/forecast values; fill Event Results first");
-        setTab("eventResults");
-        return;
-      }
-      setControlStatus("running replay for completed high-impact events...");
+      setControlStatus("running market-reaction replay for completed high-impact events...");
       await replayRecentCompletedEvents(5);
-      setControlStatus("post-event replay finished; review Scenario Lab");
+      setControlStatus("post-event market-reaction replay finished; review Scenario Lab. Event Results are optional enrichment only.");
       setTab("scenarioLab");
     }
 
@@ -4404,7 +4400,7 @@ export default function App() {
           <Card style={{ background: "#102016", borderColor: "#166534", marginBottom: 14 }}>
             <b style={{ color: C.green }}>Simplified workflow:</b>{" "}
             <span style={{ color: C.muted }}>
-              Most days you only need: Run Daily Refresh → Check Scenario Lab. After a major event passes: fill Event Results if needed → Run Post-Event Update.
+              Most days you only need: Run Daily Refresh → Check Scenario Lab. After a major event passes: Run Post-Event Update. Event Results is optional only.
             </span>
           </Card>
 
@@ -4438,10 +4434,10 @@ export default function App() {
             <StepCard
               number="3"
               title="After a major event"
-              desc="If actual/forecast values are missing, fill Event Results first. Then run replay reconstruction. No timed button clicking is required."
+              desc="Run market-reaction replay. It does not require you to manually enter actual/forecast values. Event Results is optional enrichment only."
               action={runPostEventUpdate}
               button="Run post-event update"
-              secondary={<button onClick={() => setTab("eventResults")} style={btn(false)}>Fill Event Results</button>}
+              secondary={<button onClick={() => setTab("eventResults")} style={btn(false)}>Optional enrichment</button>}
             />
 
             <StepCard
@@ -4470,19 +4466,11 @@ export default function App() {
 
           <Card>
             <Title icon="🧭" title="What should I do now?" sub="System recommendation." />
-            {completedMissingResults.length > 0 ? (
+            {replayReadyEvents.length > 0 ? (
               <Card style={{ background: "#171008", borderColor: "#92400e" }}>
-                <b style={{ color: C.gold }}>Fill missing event results</b>
+                <b style={{ color: C.gold }}>Run market-reaction replay</b>
                 <p style={{ color: C.muted, lineHeight: 1.6 }}>
-                  {completedMissingResults.length} completed high-impact event(s) are missing actual values. Fill Event Results before trusting replay interpretation.
-                </p>
-                <button onClick={() => setTab("eventResults")} style={btn(false)}>Go to Event Results</button>
-              </Card>
-            ) : replayReadyEvents.length > 0 && replayRecords.length === 0 ? (
-              <Card style={{ background: "#171008", borderColor: "#92400e" }}>
-                <b style={{ color: C.gold }}>Run replay reconstruction</b>
-                <p style={{ color: C.muted, lineHeight: 1.6 }}>
-                  At least one completed high-impact event is ready for replay. Run Post-Event Update.
+                  Completed high-impact event(s) are available. Run replay reconstruction first. Actual/forecast values are optional enrichment and are not required.
                 </p>
                 <button onClick={runPostEventUpdate} style={btn(false)}>Run post-event update</button>
               </Card>
@@ -4490,7 +4478,7 @@ export default function App() {
               <Card style={{ background: C.card2 }}>
                 <b>Review Scenario Lab</b>
                 <p style={{ color: C.muted, lineHeight: 1.6 }}>
-                  No urgent manual action is required. Review Scenario Lab and next major catalyst.
+                  No completed high-impact event is ready for replay right now. Review Scenario Lab and next major catalyst.
                 </p>
                 <button onClick={() => setTab("scenarioLab")} style={btn(false)}>Open Scenario Lab</button>
               </Card>
@@ -4500,7 +4488,7 @@ export default function App() {
           <Card>
             <Title icon="⚙️" title="Advanced tabs" sub="You usually do not need these every day." />
             <p style={{ color: C.muted, lineHeight: 1.7 }}>
-              Macro Calendar is mainly for checking dates. Auto Tracker is optional/experimental. Post-Event Tracker is manual override/audit.
+              Macro Calendar is mainly for checking dates. Event Results is optional enrichment, not a required step. Auto Tracker is optional/experimental.
               The normal workflow should start here, in Control Center.
             </p>
           </Card>
@@ -4531,7 +4519,7 @@ export default function App() {
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.14.1",
+        appVersion: "GoldScope v2.15",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -4604,6 +4592,7 @@ export default function App() {
                 <Badge value={model.confidence.score >= 70 ? "supportive" : model.confidence.score >= 45 ? "warning" : "negative"}>
                   {model.confidence.label} · {model.confidence.score}%
                 </Badge>
+                <Badge value="blue">{model.confidence.evidenceMode}</Badge>
               </div>
             </div>
             <p style={{ color: C.muted, lineHeight: 1.6 }}>
@@ -4718,8 +4707,8 @@ export default function App() {
             <Title icon="✅" title="Workflow" sub="Recommended order." />
             <ol style={{ color: C.muted, lineHeight: 1.7, paddingLeft: 20 }}>
               <li>Check Macro Calendar and Event Risk.</li>
-              <li>Fill Event Results after release.</li>
-              <li>Run Event Replay.</li>
+              <li>Run Event Replay after release.</li>
+              <li>Optionally enrich Event Results if official actual/forecast data is available.</li>
               <li>Use Scenario Lab to compare bullish/bearish/wait cases.</li>
               <li>Export scenario snapshot for future BI migration.</li>
             </ol>
@@ -4733,7 +4722,7 @@ export default function App() {
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.14.1",
+        appVersion: "GoldScope v2.15",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -5018,14 +5007,14 @@ export default function App() {
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.14.1</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.15</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
               <Badge value={bias.color === C.green ? "bullish" : bias.color === C.red ? "bearish" : "warning"}>{bias.label.replace("Research bias: ", "")}</Badge>
             </div>
             <p style={{ color: C.muted, margin: "7px 0 0", fontSize: 13 }}>
-              XAUUSD research terminal · TradingView chart · GDELT news · stable FRED macro drivers · calendar and replay evidence fix fixed · no broker connection · no auto-trading
+              XAUUSD research terminal · TradingView chart · GDELT news · stable FRED macro drivers · market reaction first workflow fixed · no broker connection · no auto-trading
             </p>
           </div>
           <div className="layout-note" style={{ display: "flex", gap: 8 }}>

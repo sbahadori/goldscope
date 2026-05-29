@@ -535,3 +535,25 @@ Fixes:
 
 Why:
 Scenario Lab must not silently use stale localStorage. Next catalyst and latest replay evidence must be grounded in event dates, not UI save time.
+
+
+## v2.15 - Market-Reaction-First Workflow
+
+This version fixes the UX problem where the app seemed to require the user to manually enter actual/forecast values.
+
+Key change:
+- Event Results is now optional enrichment only.
+- Post-event workflow no longer blocks on missing actual/forecast/previous values.
+- Control Center now tells the user to run market-reaction replay after major events.
+- Event Replay remains the main post-event method.
+- Actual/forecast values will later be automated through Trading Economics or official-source ingestion in the BI/DataOps platform.
+
+Normal workflow:
+1. Run Daily Refresh.
+2. Review Scenario Lab.
+3. After a major event passes, run Post-Event Update.
+4. Optionally enrich Event Results if official data is available.
+5. Export if needed.
+
+Why:
+The user is an end user, not a data provider. The product must not depend on manual entry of economic actual/forecast values.

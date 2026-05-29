@@ -1,12 +1,12 @@
 @echo off
 setlocal EnableExtensions
-title GoldScope v2.14.1 - Calendar Replay Fix
+title GoldScope v2.15 - Market Reaction First
 color 0A
 
 set LOG=%~dp0goldscope-v2-run.log
 
 echo ============================================================
-echo GoldScope v2.14.1 - Calendar Replay Fix
+echo GoldScope v2.15 - Market Reaction First
 echo ============================================================
 echo.
 echo Log:
