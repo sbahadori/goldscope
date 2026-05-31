@@ -2015,9 +2015,9 @@ function isMiningCompanyOrEquityNews(item) {
 }
 
 function snapshotHasSpotOrTechnicalPrice(snapshot) {
+  if (snapshot?.technicalContext?.status === "available") return true;
   const raw = JSON.stringify(snapshot || {}).toLowerCase();
   return (
-    raw.includes("technicalcontext") ||
     raw.includes("spotprice") ||
     raw.includes("xauusdprice") ||
     raw.includes("currentprice") ||
@@ -2026,6 +2026,205 @@ function snapshotHasSpotOrTechnicalPrice(snapshot) {
     raw.includes("pricelevel")
   );
 }
+
+
+function sma(values, period) {
+  if (!Array.isArray(values) || values.length < period) return null;
+  const slice = values.slice(-period).filter((v) => Number.isFinite(v));
+  if (slice.length < period) return null;
+  return slice.reduce((a, b) => a + b, 0) / period;
+}
+
+function ema(values, period) {
+  if (!Array.isArray(values) || values.length < period) return null;
+  const clean = values.filter((v) => Number.isFinite(v));
+  if (clean.length < period) return null;
+  const k = 2 / (period + 1);
+  let current = clean.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < clean.length; i++) {
+    current = clean[i] * k + current * (1 - k);
+  }
+  return current;
+}
+
+function rsi(values, period = 14) {
+  const clean = (values || []).filter((v) => Number.isFinite(v));
+  if (clean.length < period + 1) return null;
+  let gains = 0;
+  let losses = 0;
+  for (let i = clean.length - period; i < clean.length; i++) {
+    const diff = clean[i] - clean[i - 1];
+    if (diff >= 0) gains += diff;
+    else losses += Math.abs(diff);
+  }
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - 100 / (1 + rs);
+}
+
+function atr(candles, period = 14) {
+  const c = Array.isArray(candles) ? candles.filter((x) =>
+    Number.isFinite(x.high) && Number.isFinite(x.low) && Number.isFinite(x.close)
+  ) : [];
+  if (c.length < period + 1) return null;
+  const trs = [];
+  for (let i = 1; i < c.length; i++) {
+    const high = c[i].high;
+    const low = c[i].low;
+    const prevClose = c[i - 1].close;
+    trs.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
+  }
+  const slice = trs.slice(-period);
+  if (slice.length < period) return null;
+  return slice.reduce((a, b) => a + b, 0) / period;
+}
+
+function round2(x) {
+  return Number.isFinite(x) ? Math.round(x * 100) / 100 : null;
+}
+
+function classifyTrend(price, ema20, ema50, ema200) {
+  if (![price, ema20, ema50].every(Number.isFinite)) return "unknown";
+  if (Number.isFinite(ema200)) {
+    if (price > ema20 && ema20 > ema50 && ema50 > ema200) return "bullish";
+    if (price < ema20 && ema20 < ema50 && ema50 < ema200) return "bearish";
+  }
+  if (price > ema20 && ema20 > ema50) return "mild-bullish";
+  if (price < ema20 && ema20 < ema50) return "mild-bearish";
+  return "neutral/range";
+}
+
+function classifyMomentum(rsi14, price, prevPrice) {
+  if (!Number.isFinite(rsi14)) return "unknown";
+  const direction = Number.isFinite(price) && Number.isFinite(prevPrice) ? price - prevPrice : 0;
+  if (rsi14 >= 70) return direction >= 0 ? "overbought-positive" : "overbought-fading";
+  if (rsi14 <= 30) return direction <= 0 ? "oversold-negative" : "oversold-rebounding";
+  if (rsi14 > 55) return "positive";
+  if (rsi14 < 45) return "negative";
+  return "neutral";
+}
+
+function estimateSupportResistance(candles, lookback = 60) {
+  const c = Array.isArray(candles) ? candles.filter((x) =>
+    Number.isFinite(x.high) && Number.isFinite(x.low)
+  ) : [];
+  const slice = c.slice(-lookback);
+  if (slice.length < 10) return { support: [], resistance: [] };
+  const lows = slice.map((x) => x.low).sort((a, b) => a - b);
+  const highs = slice.map((x) => x.high).sort((a, b) => b - a);
+  const support = [...new Set(lows.slice(0, 3).map(round2))].filter(Number.isFinite);
+  const resistance = [...new Set(highs.slice(0, 3).map(round2))].filter(Number.isFinite);
+  return { support, resistance };
+}
+
+function computeTechnicalContextFromCandles(candles, symbol = "GC=F", timeframe = "1h") {
+  const c = Array.isArray(candles) ? candles.filter((x) =>
+    Number.isFinite(x.close) && Number.isFinite(x.high) && Number.isFinite(x.low)
+  ) : [];
+
+  if (c.length < 30) {
+    return {
+      symbol,
+      proxy: symbol === "GC=F" ? "Gold futures proxy for XAUUSD" : "Price proxy",
+      status: "insufficient-data",
+      reason: `Need at least 30 candles; got ${c.length}.`,
+      timeframes: {},
+      technicalBias: "unknown",
+      technicalConfidence: 0,
+    };
+  }
+
+  const closes = c.map((x) => x.close);
+  const price = closes[closes.length - 1];
+  const prevPrice = closes[closes.length - 2];
+
+  const ema20 = ema(closes, 20);
+  const ema50 = ema(closes, 50);
+  const ema200 = ema(closes, 200);
+  const rsi14 = rsi(closes, 14);
+  const atr14 = atr(c, 14);
+  const { support, resistance } = estimateSupportResistance(c, 60);
+  const trend = classifyTrend(price, ema20, ema50, ema200);
+  const momentum = classifyMomentum(rsi14, price, prevPrice);
+  const priceVsEMA200 = Number.isFinite(ema200)
+    ? price > ema200 ? "above" : price < ema200 ? "below" : "at"
+    : "unknown";
+
+  let bias = "neutral";
+  let score = 0;
+  if (trend.includes("bullish")) score += 2;
+  if (trend.includes("bearish")) score -= 2;
+  if (momentum.includes("positive")) score += 1;
+  if (momentum.includes("negative")) score -= 1;
+  if (priceVsEMA200 === "above") score += 1;
+  if (priceVsEMA200 === "below") score -= 1;
+
+  if (score >= 3) bias = "bullish";
+  else if (score <= -3) bias = "bearish";
+  else if (score > 0) bias = "mild-bullish";
+  else if (score < 0) bias = "mild-bearish";
+
+  const technicalConfidence = Math.max(20, Math.min(70, 25 + Math.abs(score) * 12 + (c.length >= 200 ? 10 : 0)));
+
+  return {
+    symbol,
+    proxy: symbol === "GC=F" ? "Gold futures proxy for XAUUSD; not spot XAUUSD." : "Price proxy",
+    status: "available",
+    lastUpdated: c[c.length - 1]?.time || new Date().toISOString(),
+    candleCount: c.length,
+    timeframes: {
+      [timeframe]: {
+        lastPrice: round2(price),
+        previousClose: round2(prevPrice),
+        ema20: round2(ema20),
+        ema50: round2(ema50),
+        ema200: round2(ema200),
+        rsi14: round2(rsi14),
+        atr14: round2(atr14),
+        trend,
+        momentum,
+        priceVsEMA200,
+        support,
+        resistance,
+        structure: trend === "neutral/range" ? "range/unclear" : trend,
+      },
+    },
+    technicalBias: bias,
+    technicalConfidence,
+    guardrails: [
+      "Technical analysis is confirmation/context only; it must not override missing macro/event evidence.",
+      "Price levels come from GC=F proxy data, not direct spot XAUUSD.",
+    ],
+  };
+}
+
+async function fetchYahooChart(symbol = "GC=F", range = "60d", interval = "1h") {
+  const url = `/api/yahoo/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`;
+  const res = await fetch(url, { cache: "no-store" });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Yahoo chart HTTP ${res.status}: ${text.slice(0, 300)}`);
+  const data = JSON.parse(text);
+  const result = data?.chart?.result?.[0];
+  const timestamps = result?.timestamp || [];
+  const quote = result?.indicators?.quote?.[0] || {};
+  const closes = quote.close || [];
+  const highs = quote.high || [];
+  const lows = quote.low || [];
+  const opens = quote.open || [];
+
+  return timestamps.map((t, i) => ({
+    time: new Date(t * 1000).toISOString(),
+    open: Number(opens[i]),
+    high: Number(highs[i]),
+    low: Number(lows[i]),
+    close: Number(closes[i]),
+  })).filter((x) =>
+    Number.isFinite(x.open) && Number.isFinite(x.high) && Number.isFinite(x.low) && Number.isFinite(x.close)
+  );
+}
+
 
 function extractMiningNewsTitles(snapshot) {
   const items = snapshot?.gdeltNews?.items || [];
@@ -5079,6 +5278,8 @@ export default function App() {
     const [lastRaw, setLastRaw] = useState("");
     const [promptPreview, setPromptPreview] = useState("");
     const [contextSnapshot, setContextSnapshot] = useState(null);
+    const [technicalContext, setTechnicalContext] = useState(null);
+    const [technicalStatus, setTechnicalStatus] = useState("not loaded");
     const [promptMode, setPromptMode] = useState("scenario");
     const [outputDepth, setOutputDepth] = useState("standard");
 
@@ -5465,6 +5666,33 @@ ${err.message}`);
       return { latest, recent };
     }
 
+
+    async function loadTechnicalContext() {
+      setTechnicalStatus("loading GC=F technical data...");
+      try {
+        const candles = await fetchYahooChart("GC=F", "60d", "1h");
+        const ctx = computeTechnicalContextFromCandles(candles, "GC=F", "1h");
+        setTechnicalContext(ctx);
+        setTechnicalStatus(ctx.status === "available"
+          ? `technical context ready: ${ctx.technicalBias} / ${ctx.technicalConfidence}`
+          : `technical context ${ctx.status}: ${ctx.reason || ""}`);
+        return ctx;
+      } catch (err) {
+        const ctx = {
+          symbol: "GC=F",
+          proxy: "Gold futures proxy for XAUUSD",
+          status: "error",
+          error: err.message,
+          timeframes: {},
+          technicalBias: "unknown",
+          technicalConfidence: 0,
+        };
+        setTechnicalContext(ctx);
+        setTechnicalStatus(`technical context error: ${err.message}`);
+        return ctx;
+      }
+    }
+
     function buildGoldScopeContextSnapshot() {
       const scenario = buildScenarioModel();
       const fredCompact = compactFredRows();
@@ -5474,7 +5702,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.32",
+        appVersion: "GoldScope v2.33",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -5492,6 +5720,12 @@ ${err.message}`);
         },
         calendar: compactCalendar(),
         replayEvidence: replayCompact,
+        technicalContext: technicalContext || {
+          status: "missing",
+          reason: "Technical context has not been loaded yet. Use Load Technical Context.",
+          technicalBias: "unknown",
+          technicalConfidence: 0,
+        },
         sourceHealth: health,
         contextQualityFlags: qualityFlags,
         dataReadiness: {
@@ -5499,6 +5733,7 @@ ${err.message}`);
           newsItems: (news || []).length,
           calendarEvents: (calendarUniverse || []).length,
           replayRecords: (replayRecords || []).length,
+          technicalStatus,
           proxyStatus,
           ollamaStatus,
         },
@@ -5548,6 +5783,8 @@ STRICT SOURCE RULES:
 14. Do not include phrases such as "Okay, the user wants", "Let me", "I need to", "/think", or internal planning text.
 15. Instrument guard: do not treat mining-company stocks, ETF/company shares, OTCMKTS items, or retail gold-rate articles as spot gold/XAUUSD movement.
 16. Do not mention specific price levels, support, resistance, breakout, breakdown, or "recover above/below" unless spotPrice or technicalContext exists in the snapshot.
+17. If technicalContext exists, use it only as market-confirmation context. It must not override missing macro/event evidence.
+18. If technicalContext uses GC=F, state that it is a gold futures proxy for XAUUSD, not direct spot XAUUSD.
 
 MACRO LOGIC GUARD:
 Apply these rules unless the GoldScope state explicitly contradicts them:
@@ -5579,6 +5816,7 @@ Before finalizing, check your own answer for these mistakes:
 - If contextQualityFlags.newsStrength is weak, label news evidence as weak/limited even if GDELT is live.
 - Do not convert company-stock news such as Kinross, Victoria Gold, Barrick, Newmont, OTCMKTS, stock, shares, trading up/down into XAUUSD price action.
 - Do not invent price levels such as $2,300/oz unless present in the snapshot.
+- If technicalContext.status is available, discuss technicalBias, trend, RSI, ATR, EMA alignment, support/resistance, and priceVsEMA200 as confirmation only.
 
 TASK:
 ${modeGuide}
@@ -5609,6 +5847,7 @@ Use this table. In the News row, explicitly mention contextQualityFlags.newsStre
 | News | ... | ... | ... |
 | Calendar/event risk | ... | ... | ... |
 | Replay evidence | ... | ... | ... |
+| Technical context | ... | ... | ... |
 | Source/data readiness | ... | ... | ... |
 
 4. Bullish case for gold
@@ -5633,7 +5872,12 @@ Use this table. In the News row, explicitly mention contextQualityFlags.newsStre
 - Explain why the system should avoid strong bias.
 - Identify exactly what evidence is missing.
 
-7. Decision gates
+7. Technical confirmation
+- If technicalContext is available, summarize trend, EMA alignment, RSI14, ATR14, support/resistance and technicalBias.
+- Explain whether technical context confirms, weakens, or contradicts the macro scenario.
+- If technicalContext is missing/error, say it is unavailable.
+
+8. Decision gates
 Give 4-6 concrete gates.
 Do not invent numeric thresholds.
 Use conditional wording:
@@ -5642,13 +5886,13 @@ Use conditional wording:
 - If CPI is hot but real yields fall, then...
 - If CPI is hot and real yields rise, then...
 
-8. Next catalyst plan
+9. Next catalyst plan
 - Next event to watch.
 - What to monitor before the event.
 - What to monitor after the event.
 - Mention avoid-window exactly as written in the state. Do not rewrite "2h before and 1h after" as "2h before/after".
 
-9. Final research note
+10. Final research note
 - One short paragraph.
 - No trading instruction.
 - End with <END_GOLDSCOPE_REPORT>`;
@@ -5797,9 +6041,12 @@ ${err.stack || err.message || String(err)}`);
 
     async function runScenario() {
       try {
+        if (!technicalContext || technicalContext.status === "missing") {
+          await loadTechnicalContext();
+        }
         const prompt = buildRealGoldScopePrompt(promptMode);
         setPromptPreview(prompt);
-        await callOllama(prompt, "no-think macro-guarded GoldScope scenario analysis");
+        await callOllama(prompt, "technical-aware GoldScope scenario analysis");
       } catch (err) {
         setAiStatus(`prompt builder error: ${err.message}`);
         setAiOutput(`Prompt builder failed before sending to Ollama.\n\n${err.stack || err.message || String(err)}`);
@@ -5809,7 +6056,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.32",
+        appVersion: "GoldScope v2.33",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -5843,7 +6090,7 @@ ${err.stack || err.message || String(err)}`);
     return (
       <div style={{ display: "grid", gap: 16 }}>
         <Card>
-          <Title icon="🤖" title="AI Engine - Instrument Guard + Price-Level Validator" sub="Prompt is generated automatically. No manual prompt editing is needed." />
+          <Title icon="🤖" title="AI Engine - Technical Analysis Layer" sub="Prompt is generated automatically. No manual prompt editing is needed." />
 
           <Card style={{ background: "#170a12", borderColor: "#7f1d1d", marginBottom: 14 }}>
             <b style={{ color: C.red }}>Important:</b>{" "}
@@ -5906,6 +6153,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="blue">GDELT news: {(news || []).length}</Badge>
               <Badge value="blue">Calendar events: {(calendarUniverse || []).length}</Badge>
               <Badge value="blue">Replay records: {(replayRecords || []).length}</Badge>
+              <Badge value={technicalContext?.status === "available" ? "supportive" : "warning"}>Technical: {technicalContext?.status || "missing"}</Badge>
               <Badge value="warning">Macro logic guard: on</Badge>
               <Badge value="warning">No invented thresholds: on</Badge>
               <Badge value="supportive">Qwen /no_think: on</Badge>
@@ -5915,7 +6163,8 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Rate limit guard: on</Badge>
               <Badge value="supportive">AI validator: on</Badge>
               <Badge value="supportive">Instrument guard: on</Badge>
-              <Badge value="supportive">Price-level validator: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
+              <Badge value="supportive">Price-level validator: on</Badge>
+              <Badge value="supportive">Technical layer: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
 
@@ -5924,6 +6173,9 @@ ${err.stack || err.message || String(err)}`);
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
               <button type="button" disabled={aiRunning} onClick={runSmoke} style={btn(aiRunning)}>
                 {aiRunning ? "Running..." : "Run smoke test"}
+              </button>
+              <button type="button" disabled={aiRunning} onClick={loadTechnicalContext} style={btn(aiRunning)}>
+                Load technical context
               </button>
               <button type="button" disabled={aiRunning} onClick={refreshPromptPreview} style={btn(aiRunning)}>
                 Preview prompt
@@ -5935,6 +6187,7 @@ ${err.stack || err.message || String(err)}`);
               <button type="button" onClick={copyPrompt} style={btn(false)}>Copy prompt</button>
               <button type="button" onClick={downloadAIRecord} style={btn(false)}>Download AI record</button>
               <Badge value={statusBadge(aiStatus)}>{aiStatus}</Badge>
+              <Badge value={technicalContext?.status === "available" ? "supportive" : "warning"}>{technicalStatus}</Badge>
             </div>
           </Card>
 
