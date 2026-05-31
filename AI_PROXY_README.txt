@@ -1,5 +1,6 @@
 GoldScope v2.24 - Real GoldScope Context Prompt
 
+
 This package does not include or overwrite:
 - public/config/ai_credentials.json
 - FRED key/config files
