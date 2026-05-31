@@ -1,103 +1,89 @@
 @echo off
-setlocal EnableExtensions
-title GoldScope v2.16.1 - Stable Smart Analysis
-color 0A
-
-set LOG=%~dp0goldscope-v2-run.log
-
-echo ============================================================
-echo GoldScope v2.16.1 - Stable Smart Analysis
-echo ============================================================
-echo.
-echo Log:
-echo   %LOG%
-echo.
-
+setlocal
+title GoldScope v2.29.1 - Prompt Builder Fix
 cd /d "%~dp0"
 
-echo ============================================================ > "%LOG%"
-echo GoldScope v2 launcher >> "%LOG%"
-echo Started at %DATE% %TIME% >> "%LOG%"
-echo Folder: %CD% >> "%LOG%"
-echo ============================================================ >> "%LOG%"
-
-if not exist package.json (
-  echo [ERROR] package.json not found. Run this file inside the project folder.
-  echo [ERROR] package.json not found. >> "%LOG%"
-  pause
-  exit /b 1
-)
-
-if not exist src\App.jsx (
-  echo [ERROR] src\App.jsx not found.
-  echo [ERROR] src\App.jsx not found. >> "%LOG%"
-  pause
-  exit /b 1
-)
-
+echo ====================================================
+echo   GoldScope v2.29.1 - Prompt Builder Fix
+echo ====================================================
+echo.
+echo One launcher only. No separate AI proxy is required.
+echo.
+echo Checking Node.js...
 where node >nul 2>nul
 if errorlevel 1 (
-  echo [ERROR] Node.js not found. Install Node.js LTS first.
-  echo [ERROR] Node.js not found. >> "%LOG%"
+  echo.
+  echo ERROR: Node.js is not available in PATH.
+  echo Install Node.js LTS, then close and reopen PowerShell.
+  echo.
   pause
   exit /b 1
 )
 
+node -v
+echo.
+echo Checking npm...
 where npm >nul 2>nul
 if errorlevel 1 (
-  echo [ERROR] npm not found. Reinstall Node.js LTS.
-  echo [ERROR] npm not found. >> "%LOG%"
+  echo.
+  echo ERROR: npm is not available in PATH.
+  echo Reinstall Node.js LTS or repair PATH.
+  echo.
   pause
   exit /b 1
 )
 
-echo Node:
-node -v
-node -v >> "%LOG%" 2>&1
+npm -v
+echo.
 
-echo npm:
-call npm -v
-call npm -v >> "%LOG%" 2>&1
-
-if exist node_modules\.vite (
-  echo Cleaning Vite cache...
-  rmdir /s /q node_modules\.vite >> "%LOG%" 2>&1
+if not exist package.json (
+  echo ERROR: package.json not found.
+  echo Make sure you extracted the ZIP into the GoldScope project root.
+  echo Current folder:
+  cd
+  echo.
+  pause
+  exit /b 1
 )
 
 if not exist node_modules (
-  echo Installing dependencies...
+  echo Installing dependencies. This may take a few minutes...
   call npm install
   if errorlevel 1 (
-    echo [ERROR] npm install failed.
-    echo [ERROR] npm install failed. >> "%LOG%"
+    echo.
+    echo ERROR: npm install failed.
+    echo.
     pause
     exit /b 1
   )
-) else (
-  echo node_modules exists. Skipping install.
 )
 
 echo.
-echo Updating official macro calendar...
-call npm run update:calendar
+echo Checking Ollama direct endpoint...
+curl.exe http://localhost:11434/api/tags >nul 2>nul
 if errorlevel 1 (
+  echo WARNING: Ollama does not seem reachable at http://localhost:11434/api/tags
+  echo GoldScope will still open, but AI Engine will not work until Ollama is running.
   echo.
-  echo [WARNING] Calendar update failed. The app will still start using existing/embedded calendar data.
+) else (
+  echo Ollama endpoint is reachable.
   echo.
 )
 
+echo Starting GoldScope dev server...
+echo URL: http://127.0.0.1:5173
 echo.
-echo Starting GoldScope v2.5 at:
-echo   http://localhost:3000/
-echo.
+echo The browser will open in 5 seconds.
 echo Keep this window open.
-echo Press Ctrl+C to stop.
+echo Press Ctrl+C to stop GoldScope.
 echo.
 
-start "" "http://localhost:3000/"
-call npm run dev
+start "" cmd /c "timeout /t 5 /nobreak >nul && start http://127.0.0.1:5173"
+
+call npm run dev -- --host 127.0.0.1 --port 5173
 
 echo.
-echo Vite stopped or crashed. Check:
-echo   %LOG%
+echo GoldScope server stopped or failed.
+echo If there was an error above, copy it and send it.
+echo.
 pause

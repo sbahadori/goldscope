@@ -1,0 +1,14 @@
+@echo off
+title GoldScope AI Proxy
+cd /d "%~dp0"
+echo ====================================================
+echo   GoldScope AI Proxy Server
+echo ====================================================
+echo.
+echo Starting proxy on http://localhost:3333
+echo Keep this window open while using GoldScope AI.
+echo Press Ctrl+C to stop.
+echo.
+node proxy-server.mjs
+echo.
+pause

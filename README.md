@@ -577,3 +577,211 @@ Run Smart Analysis:
 5. Opens Scenario Lab.
 
 Use this version instead of v2.16.
+
+
+## v2.17 - AI Scenario Engine
+
+This version integrates the standalone AI scenario engine into GoldScope.
+
+New tab:
+- AI Engine
+
+Supported provider presets:
+- DeepSeek
+- Groq
+- Together AI
+- OpenRouter
+
+New behavior:
+- No manual FRED/GDELT/calendar entry is needed.
+- The AI prompt is generated from current GoldScope state:
+  - FRED macro drivers
+  - GDELT news
+  - official macro calendar
+  - event risk
+  - replay records
+  - deterministic Scenario Lab model
+  - source health
+- Focus modes:
+  - Full scenario lab
+  - Pre-event briefing
+  - Post-event verdict
+  - Macro regime analysis
+  - Contradiction detector
+- Streaming output support for OpenAI-compatible SSE.
+- Parsed summary extracts dominant scenario, confidence, and decision gates.
+- API keys are kept in browser memory only and are not stored in localStorage.
+- AI analysis history is stored locally and can be exported; keys are excluded.
+
+Important:
+This is research analysis only. It must not be treated as financial advice or a buy/sell signal.
+For production, API calls and prompt orchestration should move to a backend/BI platform.
+
+
+## v2.18 - AI Credentials File Support
+
+This version lets you keep AI provider keys in a local config file instead of typing them every time.
+
+New files:
+- public/config/ai_credentials.json
+- public/config/ai_credentials.example.json
+- public/config/README_AI_CREDENTIALS.txt
+
+Supported config formats:
+- Native provider sections:
+  - deepseek
+  - groq
+  - openrouter
+- custom_models array, including the Groq JSON format:
+  - model_display_name
+  - model
+  - base_url
+  - api_key
+  - provider
+  - max_tokens
+
+Groq GPT-OSS support:
+- Adds model: openai/gpt-oss-120b
+- Accepts Groq base_url: https://api.groq.com/openai/v1
+
+Security note:
+- public/config/ai_credentials.json is ignored in .gitignore.
+- This is still a local frontend file served by Vite, so do not use this approach in production.
+- For production, move provider calls and secrets to a backend/BI platform proxy.
+
+
+## v2.19 - Provider-Optimized AI Settings
+
+This version updates the AI Engine using the current provider docs and the Groq GPT-OSS JSON you provided.
+
+Provider optimization:
+- DeepSeek:
+  - Default model: deepseek-v4-pro
+  - Fast option: deepseek-v4-flash
+  - Keeps deepseek-chat and deepseek-reasoner only as legacy compatibility options
+  - Uses /chat/completions endpoint through the local Vite proxy
+  - Adds user_id = goldscope_local
+  - Adds thinking + reasoning_effort for v4-pro/reasoner-style runs
+
+- Groq:
+  - Default model: openai/gpt-oss-120b
+  - Adds openai/gpt-oss-20b and Llama options
+  - Uses max_completion_tokens instead of deprecated max_tokens
+  - Supports the custom_models JSON format you pasted
+
+- OpenRouter:
+  - Default model: deepseek/deepseek-r1:free
+  - Uses OpenRouter-compatible headers:
+    - HTTP-Referer
+    - X-OpenRouter-Title
+  - Keeps free-model slugs first
+
+Config updates:
+- public/config/ai_credentials.json now supports:
+  - max_completion_tokens
+  - temperature
+  - reasoning_effort
+  - thinking
+  - custom_models array
+
+Important:
+This is still a local prototype. Do not commit real keys. For production, move all provider calls to backend/BI proxy.
+
+
+## v2.19.1 - AI Key File UX Fix
+
+Fix:
+- AI Engine no longer visually asks for an API key when the key is loaded from public/config/ai_credentials.json.
+- The API key input is now hidden behind "Manual override".
+- Provider status now explicitly says:
+  - key loaded from file
+  - key loaded manually
+  - key missing
+- Reload file button remains available.
+- Missing-key status now tells the user to edit public/config/ai_credentials.json.
+
+Why:
+The user should not feel forced to enter keys manually every time. File-based credentials are the intended local workflow.
+
+
+## v2.20.3 - AI Engine Safe Fallback
+
+Fix:
+- Replaces the AI Engine with a simplified safe component.
+- Prevents white screen by using an internal render fallback.
+- Auto-loads public/config/ai_credentials.json.
+- Does not include or overwrite any credential/FRED key files.
+
+
+## v2.20.4 - Provider Error Handling
+
+Fixes provider-specific API failures:
+- Groq 429: clearer status and lower default token budgets.
+- DeepSeek 402: shows insufficient balance/credits instead of generic error.
+- OpenRouter 404: can reload available :free models from OpenRouter /api/v1/models and avoid stale unavailable model slugs.
+- No credentials/FRED key files are included or overwritten.
+
+
+## v2.21 - Local Ollama AI
+
+This version adds a truly free AI option:
+- Ollama Local
+
+Why:
+Cloud "free" APIs are not reliable for this workflow:
+- Groq can rate-limit.
+- DeepSeek requires balance/credits.
+- OpenRouter free endpoints can disappear or be unavailable.
+
+Ollama runs locally:
+- No API key.
+- No cloud balance.
+- No provider rate limits.
+- Uses http://localhost:11434 through the Vite proxy.
+
+Setup:
+1. Install Ollama.
+2. Pull a model:
+   ollama pull qwen3:8b
+3. Make sure Ollama is running:
+   ollama serve
+4. In GoldScope:
+   AI Engine -> Ollama Local -> Check Ollama models -> Run AI scenario analysis
+
+No credential/FRED key files are included or overwritten.
+
+
+## v2.21.1 - Ollama Run Fix
+
+Fixes:
+- Ollama run button could appear to do nothing.
+- Ollama now uses non-streaming mode for stability.
+- Added Test Ollama connection button.
+- Status changes immediately to show the request was sent.
+- No credential/FRED key files are included or overwritten.
+
+
+## v2.21.2 - Ollama Generate Fix
+
+Fixes:
+- Ollama output could be saved as an empty string.
+- Ollama now uses /api/generate with stream:false instead of /api/chat.
+- Response parsing now checks:
+  - response
+  - message.content
+  - message.thinking
+  - thinking
+- If the model still returns empty text, raw response JSON is shown in AI Output.
+- No credential/FRED key files are included or overwritten.
+
+
+## v2.21.3 - Ollama Smoke Test
+
+Adds:
+- Run Ollama smoke test button.
+- Smaller Ollama analysis prompt.
+- Smoke test shows raw response if output is empty.
+
+Use this to isolate whether the issue is:
+1. Ollama/proxy connection; or
+2. Full GoldScope prompt/model generation.

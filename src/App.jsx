@@ -1333,7 +1333,7 @@ function buildAnalysisForMoves(event, moves) {
   return analyzePostEventReaction(event, record);
 }
 
-function buildReplayRecord(event, seriesMap, windowLabel = "stable smart analysis workflow fixed") {
+function buildReplayRecord(event, seriesMap, windowLabel = "Real GoldScope Context Prompt fixed") {
   const eventMs = eventTimeToTimestamp(event);
   const identity = buildEventIdentity(event);
 
@@ -1551,7 +1551,7 @@ async function reconstructEventFromHistory(event) {
     eventIdentity: identity,
     category: event.category,
     source: "event replay / per-point historical reconstruction",
-    window: "stable smart analysis workflow fixed",
+    window: "Real GoldScope Context Prompt fixed",
     actual: event.actual || "",
     forecast: event.forecast || "",
 
@@ -2002,6 +2002,14 @@ export default function App() {
   const [settings, setSettings] = useStoredSettings();
   const [tab, setTab] = useState("control");
   const [smartRunStatus, setSmartRunStatus] = useState("ready");
+  const [aiHistory, setAiHistory] = useState(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("goldscope.v2.ai.history") || "[]");
+      return Array.isArray(stored) ? stored : [];
+    } catch {
+      return [];
+    }
+  });
   const [news, setNews] = useState(MOCK_NEWS);
   const [fredRows, setFredRows] = useState(MOCK_FRED);
   const [calendarEvents, setCalendarEvents] = useState(() => {
@@ -2200,6 +2208,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("goldscope.v2.replay.records", JSON.stringify(replayRecords));
   }, [replayRecords]);
+
+  useEffect(() => {
+    localStorage.setItem("goldscope.v2.ai.history", JSON.stringify(aiHistory));
+  }, [aiHistory]);
 
   useEffect(() => {
     localStorage.setItem("goldscope.v2.event.results", JSON.stringify(eventResults));
@@ -2749,6 +2761,7 @@ export default function App() {
     ["postEvent", "Post-Event Tracker"],
     ["bias", "Bias Engine"],
     ["scenarioLab", "Scenario Lab"],
+    ["aiEngine", "AI Engine"],
     ["health", "Source Health"],
     ["export", "Export / BI"],
     ["settings", "Settings"],
@@ -3047,6 +3060,120 @@ export default function App() {
   }
 
   function Calendar() {
+
+    function providerKeyFromBaseUrl(baseUrl = "") {
+      const url = String(baseUrl).toLowerCase();
+      if (url.includes("deepseek.com")) return "deepseek";
+      if (url.includes("groq.com")) return "groq";
+      if (url.includes("openrouter.ai")) return "openrouter";
+      if (url.includes("together.xyz")) return "together";
+      return null;
+    }
+
+    function normalizeCredentialConfig(raw) {
+      const keys = {};
+      const defaults = {};
+      const settings = {};
+      const custom = [];
+
+      for (const providerKey of ["deepseek", "groq", "openrouter", "together"]) {
+        const cfg = raw?.[providerKey];
+        if (!cfg || typeof cfg !== "object") continue;
+        if (cfg.api_key && !String(cfg.api_key).startsWith("PASTE_")) keys[providerKey] = String(cfg.api_key).trim();
+        if (cfg.model) defaults[providerKey] = String(cfg.model).trim();
+        settings[providerKey] = {
+          maxCompletionTokens: cfg.max_completion_tokens || cfg.max_tokens || null,
+          temperature: cfg.temperature ?? null,
+          reasoningEffort: cfg.reasoning_effort || null,
+          thinking: cfg.thinking || null,
+        };
+        if (cfg.model) custom.push({
+          providerKey,
+          model: String(cfg.model).trim(),
+          displayName: cfg.model_display_name || cfg.model,
+          baseUrl: cfg.base_url || "",
+          maxTokens: cfg.max_tokens || null,
+          maxCompletionTokens: cfg.max_completion_tokens || cfg.max_tokens || null,
+          temperature: cfg.temperature ?? null,
+          reasoningEffort: cfg.reasoning_effort || null,
+          thinking: cfg.thinking || null,
+        });
+      }
+
+      const customModelsArray = Array.isArray(raw?.custom_models) ? raw.custom_models : [];
+      for (const cm of customModelsArray) {
+        const providerKey = providerKeyFromBaseUrl(cm.base_url);
+        if (!providerKey || !cm.model) continue;
+        if (cm.api_key && !String(cm.api_key).startsWith("PASTE_")) keys[providerKey] = String(cm.api_key).trim();
+        defaults[providerKey] = String(cm.model).trim();
+        settings[providerKey] = {
+          maxCompletionTokens: cm.max_completion_tokens || cm.max_tokens || null,
+          temperature: cm.temperature ?? null,
+          reasoningEffort: cm.reasoning_effort || null,
+          thinking: cm.thinking || null,
+        };
+        custom.push({
+          providerKey,
+          model: String(cm.model).trim(),
+          displayName: cm.model_display_name || cm.model,
+          baseUrl: cm.base_url || "",
+          maxTokens: cm.max_tokens || null,
+          maxCompletionTokens: cm.max_completion_tokens || cm.max_tokens || null,
+          temperature: cm.temperature ?? null,
+          reasoningEffort: cm.reasoning_effort || null,
+          thinking: cm.thinking || null,
+        });
+      }
+
+      return {
+        keys,
+        defaults,
+        settings,
+        customModels: custom.filter((m, idx, arr) => arr.findIndex((x) => x.providerKey === m.providerKey && x.model === m.model) === idx),
+      };
+    }
+
+    async function loadAICredentialsFromFile(showSuccess = true) {
+      setCredentialStatus("loading /config/ai_credentials.json...");
+      try {
+        const response = await fetch(`/config/ai_credentials.json?ts=${Date.now()}`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const raw = await response.json();
+        const normalized = normalizeCredentialConfig(raw);
+
+        setApiKeys((prev) => ({ ...prev, ...normalized.keys }));
+        setCredentialSource((prev) => {
+          const next = { ...prev };
+          for (const key of Object.keys(normalized.keys)) next[key] = "file";
+          return next;
+        });
+        setCustomModels(normalized.customModels);
+        setModelDefaults(normalized.defaults);
+        setProviderSettings((prev) => ({ ...prev, ...normalized.settings }));
+
+        if (normalized.defaults[provider]) {
+          setModel(normalized.defaults[provider]);
+        }
+
+        const loadedProviders = Object.keys(normalized.keys);
+        setCredentialStatus(
+          loadedProviders.length
+            ? `loaded keys for: ${loadedProviders.join(", ")}`
+            : "config file loaded, but no API keys were found"
+        );
+
+        if (showSuccess && loadedProviders.length) setAiStatus("credentials loaded from file");
+      } catch (err) {
+        setCredentialStatus(`credentials file unavailable: ${err.message}`);
+      }
+    }
+
+    useEffect(() => {
+      loadAICredentialsFromFile(false);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+
     const input = { width: "100%", boxSizing: "border-box", background: C.card2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 10, padding: "9px 10px" };
     const label = { display: "block", color: C.muted, fontSize: 11, marginBottom: 5, fontWeight: 850 };
 
@@ -4486,6 +4613,15 @@ export default function App() {
 
             <StepCard
               number="4"
+              title="Optional AI scenario analysis"
+              desc="Send the current GoldScope state to your selected free/low-cost model for deeper scenario reasoning. API key is session-only."
+              action={() => setTab("aiEngine")}
+              button="Open AI Engine"
+              secondary={<Badge value="blue">optional</Badge>}
+            />
+
+            <StepCard
+              number="5"
               title="Export important records"
               desc="Use this only when you want to preserve local prototype data or prepare samples for the future BI/DataOps platform."
               action={() => setTab("export")}
@@ -4547,6 +4683,897 @@ export default function App() {
     );
   }
 
+
+
+
+
+
+
+  function AIScenarioEngine() {
+    const [model, setModel] = useState("qwen3:8b");
+    const [models, setModels] = useState(["qwen3:8b"]);
+    const [proxyStatus, setProxyStatus] = useState("not checked");
+    const [ollamaStatus, setOllamaStatus] = useState("not checked");
+    const [aiStatus, setAiStatus] = useState("idle");
+    const [aiRunning, setAiRunning] = useState(false);
+    const [aiOutput, setAiOutput] = useState("");
+    const [lastRaw, setLastRaw] = useState("");
+    const [promptPreview, setPromptPreview] = useState("");
+    const [contextSnapshot, setContextSnapshot] = useState(null);
+    const [promptMode, setPromptMode] = useState("scenario");
+    const [outputDepth, setOutputDepth] = useState("standard");
+
+    const OLLAMA_PROXY = "/api/ollama";
+
+    const input = {
+      width: "100%",
+      boxSizing: "border-box",
+      background: C.card2,
+      color: C.text,
+      border: `1px solid ${C.border}`,
+      borderRadius: 10,
+      padding: "9px 10px",
+    };
+
+    function statusBadge(status) {
+      if (status.includes("OK") || status.includes("live") || status.includes("complete") || status.includes("ready")) return "supportive";
+      if (status.includes("error") || status.includes("failed") || status.includes("offline") || status.includes("not reachable") || status.includes("empty")) return "negative";
+      return "warning";
+    }
+
+    function safeCompact(obj) {
+      try {
+        return JSON.stringify(obj, null, 2);
+      } catch {
+        return "{}";
+      }
+    }
+
+    async function fetchWithTimeout(url, options = {}, timeoutMs = 240000) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, { ...options, signal: controller.signal });
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function checkProxy() {
+      setProxyStatus("checking internal Vite Ollama proxy...");
+      setAiStatus("checking internal proxy...");
+      try {
+        const res = await fetchWithTimeout(`${OLLAMA_PROXY}/api/tags`, { cache: "no-store" }, 12000);
+        const text = await res.text();
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
+        const data = JSON.parse(text);
+        const names = Array.isArray(data.models) ? data.models.map((m) => m.name).filter(Boolean) : [];
+        setProxyStatus(names.length ? `internal proxy OK: ${names.length} Ollama model(s)` : "internal proxy OK, but no Ollama models found");
+        setAiStatus("internal proxy OK");
+        return true;
+      } catch (err) {
+        setProxyStatus(`internal proxy failed: ${err.message}`);
+        setAiStatus("internal proxy failed");
+        setAiOutput(`GoldScope internal Ollama proxy is not reachable.
+
+This version does NOT need Start-AI-Proxy.bat.
+
+Expected:
+- GoldScope must be started with Start-GoldScope-v2.bat
+- Ollama must be running at http://localhost:11434
+- Vite must proxy /api/ollama -> http://localhost:11434
+
+Quick tests:
+1. Open in browser: http://localhost:11434/api/tags
+2. Open in browser while GoldScope is running: http://127.0.0.1:5173/api/ollama/api/tags
+
+Error:
+${err.message}`);
+        return false;
+      }
+    }
+
+    async function checkOllama() {
+      setOllamaStatus("checking Ollama through internal proxy...");
+      setAiStatus("checking Ollama...");
+      try {
+        const res = await fetchWithTimeout(`${OLLAMA_PROXY}/api/tags`, { cache: "no-store" }, 12000);
+        const text = await res.text();
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
+        const data = JSON.parse(text);
+        const names = Array.isArray(data.models) ? data.models.map((m) => m.name).filter(Boolean) : [];
+        setModels(names.length ? names : ["qwen3:8b"]);
+        if (names.length && !names.includes(model)) setModel(names[0]);
+        setOllamaStatus(names.length ? `Ollama live: ${names.join(", ")}` : "Ollama live, but no model is installed");
+        setAiStatus("Ollama OK");
+        return true;
+      } catch (err) {
+        setOllamaStatus(`Ollama not reachable: ${err.message}`);
+        setAiStatus("Ollama not reachable");
+        setAiOutput(`Ollama is not reachable through GoldScope internal proxy.
+
+Direct Ollama should answer:
+http://localhost:11434/api/tags
+
+GoldScope internal proxy should answer:
+http://127.0.0.1:5173/api/ollama/api/tags
+
+Error:
+${err.message}`);
+        return false;
+      }
+    }
+
+    function compactFredRows() {
+      return (fredRows || []).slice(0, 18).map((r) => ({
+        id: r.id,
+        label: r.label || r.id,
+        latest: r.latest,
+        previous: r.previous,
+        change: r.change,
+        direction: r.direction || "",
+        score: r.score,
+        interpretation: r.interpretation || "",
+        updatedAt: r.updatedAt || r.lastUpdated || "",
+      }));
+    }
+
+
+    function classifyNewsSourceTier(item) {
+      const source = String(item?.source || "").toLowerCase();
+      const title = String(item?.title || "").toLowerCase();
+
+      const lowTierSources = [
+        "newsx.com",
+        "dailypolitical.com",
+        "insidermonkey.com",
+        "otcmkts",
+      ];
+
+      const highTierSources = [
+        "reuters.com",
+        "bloomberg.com",
+        "ft.com",
+        "wsj.com",
+        "marketwatch.com",
+        "cnbc.com",
+        "federalreserve.gov",
+        "bls.gov",
+        "bea.gov",
+        "eia.gov",
+        "treasury.gov",
+      ];
+
+      const retailTerms = [
+        "gold rate today",
+        "city-wise",
+        "24k",
+        "22k",
+        "18k",
+        "dubai",
+        "india",
+        "uae",
+        "saudi",
+        "qatar",
+        "oman",
+        "cheaper in",
+        "should you buy now",
+      ];
+
+      if (highTierSources.some((s) => source.includes(s))) return "high";
+      if (lowTierSources.some((s) => source.includes(s))) return "low";
+      if (retailTerms.some((t) => title.includes(t))) return "low";
+      return "medium";
+    }
+
+    function classifyGoldNewsRelevance(item) {
+      const title = String(item?.title || "").toLowerCase();
+      const source = String(item?.source || "").toLowerCase();
+      const text = `${title} ${source}`;
+
+      const strongMacroTerms = [
+        "fomc",
+        "fed",
+        "federal reserve",
+        "treasury yield",
+        "real yield",
+        "dxy",
+        "dollar index",
+        "nonfarm",
+        "nfp",
+        "payroll",
+        "unemployment",
+        "cpi",
+        "pce",
+        "inflation expectations",
+        "rate cut",
+        "rate hike",
+        "geopolitical",
+        "central bank buying",
+      ];
+
+      const broadGoldTerms = [
+        "gold",
+        "bullion",
+        "xau",
+        "silver",
+        "gold rate",
+        "gold price",
+      ];
+
+      const lowRelevanceTerms = [
+        "city-wise",
+        "jewelry",
+        "gold rate today",
+        "dubai",
+        "india",
+        "uae",
+        "saudi",
+        "qatar",
+        "oman",
+        "stock",
+        "corporation",
+        "otcmkts",
+        "trading down",
+        "shares",
+        "analyst rating",
+        "24k",
+        "22k",
+        "18k",
+      ];
+
+      const strongHit = strongMacroTerms.some((t) => text.includes(t));
+      const broadHit = broadGoldTerms.some((t) => text.includes(t));
+      const lowHit = lowRelevanceTerms.some((t) => text.includes(t));
+
+      if (strongHit && !lowHit) return "macro-relevant";
+      if (strongHit && lowHit) return "mixed-relevance";
+      if (broadHit && !lowHit) return "mixed-relevance";
+      return "low-relevance";
+    }
+
+    function classifyNewsStrength(newsItems) {
+      const items = Array.isArray(newsItems) ? newsItems : [];
+      const macroRelevant = items.filter((n) => n.relevance === "macro-relevant");
+      const mixed = items.filter((n) => n.relevance === "mixed-relevance");
+      const highTierMacro = macroRelevant.filter((n) => n.sourceTier === "high");
+      const mediumOrHighMacro = macroRelevant.filter((n) => n.sourceTier === "high" || n.sourceTier === "medium");
+
+      if (highTierMacro.length >= 2 || (highTierMacro.length >= 1 && mediumOrHighMacro.length >= 2)) {
+        return "strong";
+      }
+
+      if (mediumOrHighMacro.length >= 2 || (macroRelevant.length >= 1 && mixed.length >= 2)) {
+        return "moderate";
+      }
+
+      return "weak";
+    }
+
+
+    function confidenceCapFromContext(baseScore, qualityFlags) {
+      let cap = Number(baseScore || 40);
+
+      if (qualityFlags?.missingCriticalMacroDrivers?.length >= 5) cap = Math.min(cap, 35);
+      if (qualityFlags?.replayReliability === "missing") cap = Math.min(cap, 40);
+      if (qualityFlags?.newsReliability !== "live") cap = Math.min(cap, 35);
+      if (qualityFlags?.newsRelevance === "low") cap = Math.min(cap, 35);
+      if (qualityFlags?.newsStrength === "weak") cap = Math.min(cap, 35);
+      if (qualityFlags?.eventDataCompleteness?.nextMajor?.quality === "date-only") cap = Math.min(cap, 40);
+
+      return Math.max(10, cap);
+    }
+
+    function computeContextQuality(fred, _gdelt, _replay) {
+      const fredIds = new Set((fred || []).map((r) => r.id));
+      const criticalMacro = ["DGS10", "DGS2", "DFII10", "DTWEXBGS", "DFF", "UNRATE", "PAYEMS"];
+      const missingCriticalMacroDrivers = criticalMacro.filter((id) => !fredIds.has(id));
+
+      const gdeltStatus = health?.gdelt?.status || "unknown";
+      const fredStatus = health?.fred?.status || "unknown";
+      const replayCount = (replayRecords || []).length;
+
+      const eventCompleteness = {};
+      const nextMajor = buildScenarioModel()?.nextMajor;
+      if (nextMajor) {
+        eventCompleteness.nextMajor = {
+          event: nextMajor.name,
+          hasPrevious: Boolean(nextMajor.previous),
+          hasForecast: Boolean(nextMajor.forecast),
+          hasActual: Boolean(nextMajor.actual),
+          quality: nextMajor.actual || nextMajor.forecast ? "partial-results" : "date-only",
+        };
+      }
+
+      const newsItems = compactNews();
+      const macroRelevantNewsCount = newsItems.filter((n) => n.relevance === "macro-relevant").length;
+      const mixedNewsCount = newsItems.filter((n) => n.relevance === "mixed-relevance").length;
+      const highTierMacroNewsCount = newsItems.filter((n) => n.relevance === "macro-relevant" && n.sourceTier === "high").length;
+      const lowTierMacroNewsCount = newsItems.filter((n) => n.relevance === "macro-relevant" && n.sourceTier === "low").length;
+      const newsRelevance = macroRelevantNewsCount >= 2 ? "high" : macroRelevantNewsCount + mixedNewsCount >= 1 ? "partial" : "low";
+      const newsStrength = classifyNewsStrength(newsItems);
+
+      const preliminaryFlags = {
+        missingCriticalMacroDrivers,
+        macroReliability: missingCriticalMacroDrivers.length ? "partial" : "stronger",
+        newsReliability: gdeltStatus === "live" ? "live" : gdeltStatus === "fallback" ? "low-fallback" : "weak-or-missing",
+        newsRelevance,
+        newsStrength,
+        macroRelevantNewsCount,
+        highTierMacroNewsCount,
+        lowTierMacroNewsCount,
+        replayReliability: replayCount > 0 ? "available" : "missing",
+        eventDataCompleteness: eventCompleteness,
+        sourceReliabilitySummary: {
+          fred: fredStatus,
+          gdelt: gdeltStatus,
+          tradingEconomics: health?.tradingEconomics?.status || "unknown",
+          reddit: health?.reddit?.status || "unknown",
+          youtube: health?.youtube?.status || "unknown",
+        },
+      };
+
+      const qualityFlags = {
+        ...preliminaryFlags,
+        maxRecommendedConfidence: confidenceCapFromContext(buildScenarioModel()?.confidence?.score, preliminaryFlags),
+        evidenceLabelRule: "Only items with observed values, actual outcomes, replay records, or live macro-relevant news may be called confirmed. Conditional future events must be labeled unconfirmed/conditional.",
+      };
+
+      return qualityFlags;
+    }
+
+    function compactNews() {
+      return (news || []).slice(0, 12).map((n) => ({
+        title: n.title,
+        source: n.source,
+        sourceTier: classifyNewsSourceTier(n),
+        driver: n.driver || n.category || "",
+        impact: n.impact,
+        confidence: n.confidence,
+        tone: n.tone || n.sentiment || "",
+        relevance: classifyGoldNewsRelevance(n),
+        publishedAt: n.publishedAt,
+        url: n.url || "",
+      }));
+    }
+
+    function compactCalendar() {
+      const now = Date.now();
+      const upcoming = (calendarUniverse || [])
+        .filter((e) => isHighImpactEvent(e))
+        .filter((e) => eventTimeToTimestamp(e) >= now - 24 * 3600 * 1000)
+        .sort((a, b) => eventTimeToTimestamp(a) - eventTimeToTimestamp(b))
+        .slice(0, 10)
+        .map((e) => ({
+          id: e.id,
+          name: e.name,
+          date: e.date,
+          time: e.time,
+          country: e.country,
+          category: e.category,
+          importance: e.importance,
+          previous: e.previous || "",
+          forecast: e.forecast || "",
+          actual: e.actual || "",
+          expectedImpact: e.expectedImpact || "",
+          avoidWindow: e.avoidWindow || "",
+          source: e.source,
+        }));
+
+      return {
+        nextMajor: buildScenarioModel()?.nextMajor || null,
+        eventRiskSummary,
+        upcomingHighImpact: upcoming,
+      };
+    }
+
+    function compactReplay() {
+      const latest = latestReplaySignal();
+      const recent = (replayRecords || []).slice(0, 8).map((r) => ({
+        eventName: r.eventName,
+        eventDate: r.eventDate,
+        eventTime: r.eventTime,
+        savedAt: r.savedAt,
+        post15: r.post15Analysis || r.reactionSchedule?.comparisons?.post15m?.analysis || null,
+        post60: r.post60Analysis || r.reactionSchedule?.comparisons?.post60m?.analysis || null,
+      }));
+      return { latest, recent };
+    }
+
+    function buildGoldScopeContextSnapshot() {
+      const scenario = buildScenarioModel();
+      const fredCompact = compactFredRows();
+      const replayCompact = compactReplay();
+      const qualityFlags = computeContextQuality(fredCompact, null, replayCompact);
+
+      const snapshot = {
+        generatedAt: new Date().toISOString(),
+        instrument: "XAUUSD / Gold only",
+        appVersion: "GoldScope v2.29",
+        deterministicScenarioLab: {
+          dominant: scenario?.dominant,
+          confidence: scenario?.confidence,
+          scores: scenario?.scores,
+          macroDirection: scenario?.macroDirection,
+          newsDirection: scenario?.newsDirection,
+          replaySignal: scenario?.replaySignal,
+          nextMajor: scenario?.nextMajor,
+          gates: scenario?.gates || [],
+        },
+        fredMacroDrivers: fredCompact,
+        gdeltNews: {
+          score: newsScore,
+          items: compactNews(),
+        },
+        calendar: compactCalendar(),
+        replayEvidence: replayCompact,
+        sourceHealth: health,
+        contextQualityFlags: qualityFlags,
+        dataReadiness: {
+          fredRows: (fredRows || []).length,
+          newsItems: (news || []).length,
+          calendarEvents: (calendarUniverse || []).length,
+          replayRecords: (replayRecords || []).length,
+          proxyStatus,
+          ollamaStatus,
+        },
+      };
+      setContextSnapshot(snapshot);
+      return snapshot;
+    }
+
+    function buildRealGoldScopePrompt(mode = promptMode) {
+      const snapshot = buildGoldScopeContextSnapshot();
+      const depthGuide = {
+        concise: "Keep the response compact. Maximum 500 words. Do not cut off mid-sentence.",
+        standard: "Give a practical research report. About 900-1400 words. Complete all sections.",
+        deep: "Give a deeper report, but do not expose hidden chain-of-thought. Use concise reasoning summaries, evidence table and decision gates. Complete all sections.",
+      }[outputDepth] || "Give a practical research report.";
+
+      const modeGuide = {
+        scenario: "Full scenario lab: infer the dominant research scenario, confidence, bullish case, bearish case, wait case, gates, invalidations and next catalyst plan.",
+        preEvent: "Pre-event briefing: focus on the next major catalyst, what is known, what is missing, and what gold-positive/gold-negative outcomes would look like.",
+        postEvent: "Post-event verdict: focus on replay evidence and whether the market reaction was gold-supportive, gold-negative, mixed or stale.",
+        contradiction: "Contradiction detector: identify conflicts between macro, news, replay and source health. Lower confidence if evidence is stale or missing.",
+      }[mode] || "Full scenario lab.";
+
+      return `/no_think
+
+You are GoldScope's local AI analyst for XAUUSD / gold only.
+
+Do not reveal hidden reasoning, private thinking, planning text, or chain-of-thought. Give only the final research report.
+
+Your role:
+Produce a research scenario report from the provided GoldScope state. This is not financial advice. Do not say "buy" or "sell". Do not provide trade instructions. Do not invent missing data.
+
+STRICT SOURCE RULES:
+1. Use only the GoldScope state snapshot below.
+2. Do not invent actual, forecast, consensus, thresholds, market pricing, or probability values unless explicitly provided.
+3. If forecast/actual values are missing, say they are missing.
+4. If news is fallback, stale, generic, low-relevance, or rate-limited, lower confidence.
+5. If replay evidence is absent, lower confidence.
+6. If macro drivers are incomplete, lower confidence.
+7. If evidence conflicts, prefer Wait-Neutral unless one side has strong multi-source confirmation.
+8. Do not call a scenario trigger "confirmed" unless it has observed values, actual outcomes, replay records, or multiple strong macro-relevant news items.
+9. A single weak news item must not be called confirmed directional evidence.
+10. Future events without actual/forecast values are conditional/unconfirmed, not confirmed.
+11. The confidence score must not exceed contextQualityFlags.maxRecommendedConfidence unless you explicitly justify why the cap should be overridden from the snapshot.
+12. Always produce a non-empty answer.
+13. End the report with: <END_GOLDSCOPE_REPORT>
+14. Do not include phrases such as "Okay, the user wants", "Let me", "I need to", "/think", or internal planning text.
+
+MACRO LOGIC GUARD:
+Apply these rules unless the GoldScope state explicitly contradicts them:
+- Rising real yields are usually gold-negative.
+- Falling real yields are usually gold-supportive.
+- Rising nominal yields are usually gold-negative if real yields also rise.
+- Falling nominal yields are usually gold-supportive if they reflect easier Fed expectations.
+- Stronger USD / DXY is usually gold-negative.
+- Weaker USD / DXY is usually gold-supportive.
+- Strong labor data is usually gold-negative if it lifts USD/yields or reduces rate-cut expectations.
+- Weak labor data is usually gold-supportive if it lowers yields or increases rate-cut expectations.
+- Hot inflation data is ambiguous: it may support gold through inflation-hedge demand, but may hurt gold if it increases hawkish Fed pricing or real yields.
+- Oil shocks affect gold indirectly through inflation expectations, yields, USD, and risk sentiment.
+- Geopolitical risk is gold-supportive only if it is present in the provided news/context.
+
+CONTRADICTION CHECK:
+Before finalizing, check your own answer for these mistakes:
+- Do not claim rising real yields are bullish for gold.
+- Do not claim falling real yields are bearish for gold.
+- Do not claim strong NFP is bullish unless the state shows risk-off or USD/yield weakness.
+- Do not claim weak NFP is bearish unless the state shows deflationary/liquidity-stress interpretation.
+- Do not turn missing evidence into a strong directional call.
+- Do not use fabricated NFP/CPI/FOMC numbers.
+- Do not create numeric triggers not present in the snapshot.
+- Do not write "Confirmed: Weak NFP" or "Confirmed: Strong NFP" when NFP actual/forecast is blank.
+- Do not overstate low-relevance gold-company or retail gold-price news as macro evidence.
+- Do not call one weak or retail-style macro-tagged article confirmed directional evidence.
+- If contextQualityFlags.newsStrength is weak, label news evidence as weak/limited even if GDELT is live.
+
+TASK:
+${modeGuide}
+
+OUTPUT DEPTH:
+${depthGuide}
+
+GOLDSCOPE STATE SNAPSHOT:
+${safeCompact(snapshot)}
+
+REQUIRED OUTPUT STRUCTURE:
+
+1. Dominant research scenario
+- Choose one: Bullish / Bearish / Wait-Neutral.
+- Explain using only the provided evidence.
+- If evidence is weak, stale, missing, or contradictory, prefer Wait-Neutral.
+
+2. Confidence score
+- Give 0-100.
+- Give one concise reason.
+- List confidence reducers.
+
+3. Evidence table
+Use this table. In the News row, explicitly mention contextQualityFlags.newsStrength and do not overstate weak news:
+| Evidence block | Current state | Gold implication | Reliability |
+|---|---|---|---|
+| Macro | ... | ... | ... |
+| News | ... | ... | ... |
+| Calendar/event risk | ... | ... | ... |
+| Replay evidence | ... | ... | ... |
+| Source/data readiness | ... | ... | ... |
+
+4. Bullish case for gold
+- Only use triggers logically supported by the snapshot.
+- Use labels: Confirmed evidence / Conditional evidence / Missing evidence.
+- If newsStrength is weak, do not place news under Confirmed evidence; place it under Conditional/Weak supporting evidence.
+- Do not label future NFP/CPI/FOMC outcomes as confirmed when actual/forecast values are blank.
+- Include invalidation conditions.
+
+5. Bearish case for gold
+- Only use triggers logically supported by the snapshot.
+- Use labels: Confirmed evidence / Conditional evidence / Missing evidence.
+- If newsStrength is weak, do not place news under Confirmed evidence; place it under Conditional/Weak supporting evidence.
+- Do not label future NFP/CPI/FOMC outcomes as confirmed when actual/forecast values are blank.
+- Include invalidation conditions.
+
+6. Wait/neutral case
+- Explain why the system should avoid strong bias.
+- Identify exactly what evidence is missing.
+
+7. Decision gates
+Give 4-6 concrete gates.
+Do not invent numeric thresholds.
+Use conditional wording:
+- If NFP materially weakens labor expectations and yields/USD fall, then...
+- If NFP strengthens labor expectations and yields/USD rise, then...
+- If CPI is hot but real yields fall, then...
+- If CPI is hot and real yields rise, then...
+
+8. Next catalyst plan
+- Next event to watch.
+- What to monitor before the event.
+- What to monitor after the event.
+- Mention avoid-window if present in the state.
+
+9. Final research note
+- One short paragraph.
+- No trading instruction.
+- End with <END_GOLDSCOPE_REPORT>`;
+    }
+
+
+    function cleanModelOutput(raw) {
+      let text = String(raw || "");
+
+      // Remove explicit Qwen/LLM thinking blocks if returned.
+      text = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+      text = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "");
+
+      // Remove common leaked meta-reasoning from local models.
+      text = text
+        .split("\n")
+        .filter((line) => {
+          const l = line.trim().toLowerCase();
+          if (!l) return true;
+          if (l.startsWith("okay, the user wants")) return false;
+          if (l.startsWith("okay, i need")) return false;
+          if (l.startsWith("let me")) return false;
+          if (l.startsWith("i need to")) return false;
+          if (l.includes("make sure i understand the request")) return false;
+          if (l.includes("the user wants me to")) return false;
+          if (l === "/think" || l === "/no_think") return false;
+          return true;
+        })
+        .join("\n")
+        .trim();
+
+      return text;
+    }
+
+    async function callOllama(prompt, label) {
+      setAiRunning(true);
+      setAiOutput("");
+      setLastRaw("");
+      setAiStatus(`clicked: ${label} at ${new Date().toLocaleTimeString()}`);
+
+      try {
+        const proxyOk = await checkProxy();
+        if (!proxyOk) return;
+
+        const ollamaOk = await checkOllama();
+        if (!ollamaOk) return;
+
+        setAiStatus(`sending ${label} to Ollama through internal Vite proxy...`);
+
+        const numPredict =
+          label === "smoke test" ? 40 :
+          outputDepth === "concise" ? 900 :
+          outputDepth === "deep" ? 2600 :
+          1800;
+
+        const body = {
+          model,
+          messages: [{ role: "user", content: prompt }],
+          stream: false,
+          options: {
+            temperature: 0.15,
+            num_predict: numPredict,
+          },
+        };
+
+        const res = await fetchWithTimeout(`${OLLAMA_PROXY}/api/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }, label === "smoke test" ? 60000 : 360000);
+
+        setAiStatus("response received; parsing...");
+
+        const rawText = await res.text();
+        setLastRaw(rawText);
+
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${rawText.slice(0, 700)}`);
+        }
+
+        let data;
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          throw new Error(`Ollama returned non-JSON:\n${rawText.slice(0, 1000)}`);
+        }
+
+        const rawOut =
+          data?.message?.content ||
+          data?.response ||
+          data?.message?.thinking ||
+          data?.thinking ||
+          "";
+
+        const out = cleanModelOutput(rawOut);
+
+        if (!out.trim()) {
+          setAiOutput(`Ollama returned JSON, but no final text content was found after cleaning.
+
+Raw model text:
+${String(rawOut || "")}
+
+Raw response:
+${JSON.stringify(data, null, 2)}`);
+          setAiStatus("complete but empty");
+        } else {
+          setAiOutput(out);
+          if (label === "smoke test") {
+            setAiStatus(out.trim().toUpperCase() === "OK" ? "smoke test OK" : "smoke test returned non-OK output");
+          } else {
+            setAiStatus(out.includes("<END_GOLDSCOPE_REPORT>") ? "complete" : "complete, but end marker missing");
+          }
+        }
+      } catch (err) {
+        setAiStatus(`error: ${err.message}`);
+        setAiOutput(`AI call failed.
+
+${err.stack || err.message || String(err)}`);
+      } finally {
+        setAiRunning(false);
+      }
+    }
+
+    async function runSmoke() {
+      await callOllama("/no_think\nReply with exactly one word: OK", "smoke test");
+    }
+
+    function refreshPromptPreview() {
+      try {
+        const prompt = buildRealGoldScopePrompt(promptMode);
+        setPromptPreview(prompt);
+        setAiStatus("prompt preview refreshed");
+      } catch (err) {
+        setAiStatus(`prompt builder error: ${err.message}`);
+        setAiOutput(`Prompt builder failed.\n\n${err.stack || err.message || String(err)}`);
+      }
+    }
+
+    async function runScenario() {
+      try {
+        const prompt = buildRealGoldScopePrompt(promptMode);
+        setPromptPreview(prompt);
+        await callOllama(prompt, "no-think macro-guarded GoldScope scenario analysis");
+      } catch (err) {
+        setAiStatus(`prompt builder error: ${err.message}`);
+        setAiOutput(`Prompt builder failed before sending to Ollama.\n\n${err.stack || err.message || String(err)}`);
+      }
+    }
+
+    function downloadAIRecord() {
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        appVersion: "GoldScope v2.29",
+        provider: "ollama-vite-proxy",
+        model,
+        promptMode,
+        outputDepth,
+        status: aiStatus,
+        output: aiOutput,
+        promptPreview,
+        contextSnapshot,
+        raw: lastRaw,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `goldscope-ai-context-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function copyOutput() {
+      navigator.clipboard?.writeText(aiOutput || "").catch(() => {});
+    }
+
+    function copyPrompt() {
+      navigator.clipboard?.writeText(promptPreview || buildRealGoldScopePrompt(promptMode)).catch(() => {});
+      setAiStatus("prompt copied");
+    }
+
+    return (
+      <div style={{ display: "grid", gap: 16 }}>
+        <Card>
+          <Title icon="🤖" title="AI Engine - News Quality Guard" sub="Prompt is generated automatically. No manual prompt editing is needed." />
+
+          <Card style={{ background: "#170a12", borderColor: "#7f1d1d", marginBottom: 14 }}>
+            <b style={{ color: C.red }}>Important:</b>{" "}
+            <span style={{ color: C.muted }}>
+              Research analysis only. No financial advice, no buy/sell signal, and no broker connection.
+            </span>
+          </Card>
+
+          <Card style={{ background: C.card2, borderColor: `${proxyStatus.includes("OK") ? C.green : C.gold}66`, marginBottom: 14 }}>
+            <Title icon="🌉" title="Step 1 - Internal Ollama Proxy" sub="Built into Vite. No separate proxy BAT is needed." />
+            <p style={{ color: C.muted, lineHeight: 1.7, marginTop: 0 }}>
+              Only run <code>Start-GoldScope-v2.bat</code>. The app uses Vite internal proxy: <code>/api/ollama</code> → <code>http://localhost:11434</code>.
+            </p>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <Badge value={statusBadge(proxyStatus)}>{proxyStatus}</Badge>
+              <button type="button" onClick={checkProxy} style={btn(false)}>Check internal proxy</button>
+            </div>
+          </Card>
+
+          <Card style={{ background: C.card2, borderColor: `${ollamaStatus.includes("live") ? C.green : C.gold}66`, marginBottom: 14 }}>
+            <Title icon="🦙" title="Step 2 - Ollama" sub="No API key. Uses your installed local model." />
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(220px, 1fr) auto", gap: 10, alignItems: "end" }}>
+              <div>
+                <label style={{ color: C.muted, fontSize: 12, fontWeight: 850 }}>Model</label>
+                <select style={input} value={model} onChange={(e) => setModel(e.target.value)}>
+                  {models.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+              <button type="button" onClick={checkOllama} style={btn(false)}>Check Ollama</button>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+              <Badge value={statusBadge(ollamaStatus)}>{ollamaStatus}</Badge>
+            </div>
+          </Card>
+
+          <Card style={{ background: C.card2, marginBottom: 14 }}>
+            <Title icon="🧠" title="Step 3 - Macro-Guarded Context Prompt" sub="GoldScope builds the prompt automatically from current state." />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
+              <div>
+                <label style={{ color: C.muted, fontSize: 12, fontWeight: 850 }}>Prompt mode</label>
+                <select style={input} value={promptMode} onChange={(e) => setPromptMode(e.target.value)}>
+                  <option value="scenario">Full scenario lab</option>
+                  <option value="preEvent">Pre-event briefing</option>
+                  <option value="postEvent">Post-event verdict</option>
+                  <option value="contradiction">Contradiction detector</option>
+                </select>
+              </div>
+              <div>
+                <label style={{ color: C.muted, fontSize: 12, fontWeight: 850 }}>Output depth</label>
+                <select style={input} value={outputDepth} onChange={(e) => setOutputDepth(e.target.value)}>
+                  <option value="concise">Concise</option>
+                  <option value="standard">Standard</option>
+                  <option value="deep">Deep</option>
+                </select>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+              <Badge value="blue">FRED rows: {(fredRows || []).length}</Badge>
+              <Badge value="blue">GDELT news: {(news || []).length}</Badge>
+              <Badge value="blue">Calendar events: {(calendarUniverse || []).length}</Badge>
+              <Badge value="blue">Replay records: {(replayRecords || []).length}</Badge>
+              <Badge value="warning">Macro logic guard: on</Badge>
+              <Badge value="warning">No invented thresholds: on</Badge>
+              <Badge value="supportive">Qwen /no_think: on</Badge>
+              <Badge value="supportive">Output cleaner: on</Badge>
+              <Badge value="supportive">Confidence cap: on</Badge>
+              <Badge value="supportive">News strength: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
+            </div>
+          </Card>
+
+          <Card style={{ background: C.card2, marginBottom: 14 }}>
+            <Title icon="▶️" title="Step 4 - Run" sub="First smoke test. Then run no-think macro-guarded GoldScope analysis." />
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <button type="button" disabled={aiRunning} onClick={runSmoke} style={btn(aiRunning)}>
+                {aiRunning ? "Running..." : "Run smoke test"}
+              </button>
+              <button type="button" disabled={aiRunning} onClick={refreshPromptPreview} style={btn(aiRunning)}>
+                Preview prompt
+              </button>
+              <button type="button" disabled={aiRunning} onClick={runScenario} style={btn(aiRunning)}>
+                {aiRunning ? "Running..." : "Run no-think macro-guarded AI analysis"}
+              </button>
+              <button type="button" onClick={copyOutput} style={btn(false)}>Copy output</button>
+              <button type="button" onClick={copyPrompt} style={btn(false)}>Copy prompt</button>
+              <button type="button" onClick={downloadAIRecord} style={btn(false)}>Download AI record</button>
+              <Badge value={statusBadge(aiStatus)}>{aiStatus}</Badge>
+            </div>
+          </Card>
+
+          <Card style={{ background: C.card2 }}>
+            <Title icon="📄" title="AI Output" sub="The report should end with <END_GOLDSCOPE_REPORT>." />
+            <pre style={{
+              whiteSpace: "pre-wrap",
+              color: C.text,
+              background: "#0b1220",
+              border: `1px solid ${C.border}`,
+              borderRadius: 12,
+              padding: 14,
+              minHeight: 260,
+              maxHeight: 640,
+              overflow: "auto",
+              lineHeight: 1.65,
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+              fontSize: 13,
+            }}>{aiOutput || "Start GoldScope, check internal proxy, check Ollama, then run smoke test. After OK, run no-think macro-guarded AI analysis."}</pre>
+          </Card>
+
+          {promptPreview && (
+            <Card style={{ background: C.card2, marginTop: 14 }}>
+              <Title icon="🧾" title="Prompt Preview" sub="For debugging only. You do not need to edit it manually." />
+              <pre style={{
+                whiteSpace: "pre-wrap",
+                color: C.muted,
+                background: C.card,
+                border: `1px solid ${C.border}`,
+                borderRadius: 12,
+                padding: 14,
+                minHeight: 180,
+                maxHeight: 420,
+                overflow: "auto",
+                lineHeight: 1.55,
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                fontSize: 12,
+              }}>{promptPreview}</pre>
+            </Card>
+          )}
+        </Card>
+      </div>
+    );
+  }
+
   function ScenarioLab() {
     const model = buildScenarioModel();
     const [activeScenario, setActiveScenario] = useState("wait");
@@ -4564,7 +5591,7 @@ export default function App() {
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.16.1",
+        appVersion: "GoldScope v2.24",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -4767,7 +5794,7 @@ export default function App() {
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.16.1",
+        appVersion: "GoldScope v2.24",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -4779,6 +5806,7 @@ export default function App() {
         reactionRecords,
         eventResults,
         scenarioNotes,
+        aiHistory,
         autoTrackJobs,
         fredRows,
         news,
@@ -4794,6 +5822,7 @@ export default function App() {
       if (type === "reactions") return { ...base, reactionRecords };
       if (type === "event-results") return { ...base, eventResults };
       if (type === "scenario-notes") return { ...base, scenarioNotes };
+      if (type === "ai-history") return { ...base, aiHistory };
       if (type === "jobs") return { ...base, autoTrackJobs };
       if (type === "source-health") return { ...base, sourceHealth: health };
       return { ...base, ...sections };
@@ -4858,6 +5887,12 @@ export default function App() {
         title: "Scenario notes",
         desc: "Bullish, bearish and wait/neutral scenario notes.",
         count: Object.keys(scenarioNotes || {}).length,
+      },
+      {
+        key: "ai-history",
+        title: "AI analysis history",
+        desc: "Saved AI scenario analysis outputs; API keys are never included.",
+        count: aiHistory.length,
       },
       {
         key: "jobs",
@@ -5032,6 +6067,7 @@ export default function App() {
     postEvent: <PostEventReactionTracker />,
     bias: <BiasEngine />,
     scenarioLab: <ScenarioLab />,
+    aiEngine: <AIScenarioEngine />,
     health: <SourceHealth />,
     export: <ExportAndBIMigration />,
     settings: <Settings />,
@@ -5052,14 +6088,14 @@ export default function App() {
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.16.1</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.24</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
               <Badge value={bias.color === C.green ? "bullish" : bias.color === C.red ? "bearish" : "warning"}>{bias.label.replace("Research bias: ", "")}</Badge>
             </div>
             <p style={{ color: C.muted, margin: "7px 0 0", fontSize: 13 }}>
-              XAUUSD research terminal · TradingView chart · GDELT news · stable FRED macro drivers · stable smart analysis workflow fixed · no broker connection · no auto-trading
+              XAUUSD research terminal · TradingView chart · GDELT news · stable FRED macro drivers · Real GoldScope Context Prompt fixed · no broker connection · no auto-trading
             </p>
           </div>
           <div className="layout-note" style={{ display: "flex", gap: 8 }}>
