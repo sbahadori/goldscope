@@ -9,3 +9,13 @@ public/config/trading_economics_credentials.txt
 public/data/calendar_source_health.json
 public/config/ai_credentials.json
 public/config/*.secret.json
+
+# Local secrets - never commit
+credentials.txt
+credentials copy.txt
+credentials*.txt
+*.env
+.env
+.env.local
+public/config/ai_credentials.json
+public/config/fred*.json
