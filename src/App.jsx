@@ -17,7 +17,7 @@ const C = {
 };
 
 const DEFAULT_SETTINGS = {
-  gdeltQuery: '"gold price" sourcelang:english',
+  gdeltQuery: '("gold" OR "XAUUSD") AND ("federal reserve" OR "FOMC" OR "treasury yield" OR "real yield" OR "dollar index" OR "DXY" OR "inflation" OR "CPI" OR "PCE" OR "payrolls" OR "NFP" OR "interest rate" OR "rate cut" OR "rate hike" OR "geopolitical" OR "central bank" OR "safe haven") sourcelang:english',
   gdeltTimespan: "1d",
   gdeltMaxRecords: 20,
   fredApiKey: "",
@@ -49,25 +49,25 @@ const FRED_SERIES = [
     mode: "level",
     unit: "%",
     goldRule: "inverse",
-    explanation: "Rising nominal yields usually increase the opportunity cost of holding gold.",
+    explanation: "Rising 10Y yield increases the opportunity cost of holding gold. When nominal yields climb alongside real yields, gold typically faces headwinds.",
   },
   {
     id: "DGS2",
     title: "US 2Y Treasury Yield",
-    group: "Fed expectations",
+    group: "Rates",
     mode: "level",
     unit: "%",
     goldRule: "inverse",
-    explanation: "The 2Y yield reflects near-term Fed expectations; rising values often pressure XAUUSD.",
+    explanation: "2Y yield is the most sensitive barometer of near-term Fed expectations. Rising 2Y signals tighter policy pricing, usually USD-positive and gold-negative.",
   },
   {
     id: "DFII10",
-    title: "10Y Real Yield Proxy",
+    title: "10Y Real Yield Proxy (TIPS)",
     group: "Real yields",
     mode: "level",
     unit: "%",
     goldRule: "inverse",
-    explanation: "Real yields are one of the most important macro drivers for gold; rising real yields are usually negative.",
+    explanation: "Real yield is the single most important macro driver for gold. Rising real yields make gold relatively unattractive; falling real yields support gold.",
   },
   {
     id: "DFF",
@@ -76,7 +76,7 @@ const FRED_SERIES = [
     mode: "level",
     unit: "%",
     goldRule: "inverse_slow",
-    explanation: "Higher-for-longer policy rates can support the dollar and pressure gold.",
+    explanation: "Higher-for-longer Fed funds supports USD and Treasury yields. A cut cycle is gold-supportive; a hike cycle or higher-for-longer is gold-negative.",
   },
   {
     id: "CPIAUCSL",
@@ -85,7 +85,7 @@ const FRED_SERIES = [
     mode: "yoy",
     unit: "% YoY",
     goldRule: "inflation",
-    explanation: "Inflation can support gold as a hedge, but hot inflation can also trigger hawkish Fed pressure.",
+    explanation: "Inflation hedge demand can support gold, but hot CPI can also trigger hawkish Fed repricing and higher real yields.",
   },
   {
     id: "CPILFESL",
@@ -94,7 +94,7 @@ const FRED_SERIES = [
     mode: "yoy",
     unit: "% YoY",
     goldRule: "inflation",
-    explanation: "Core CPI is important for Fed reaction expectations; rising core inflation is often mixed for gold.",
+    explanation: "Core CPI is a Fed-sensitive inflation signal. Cooling core CPI can support gold via easier Fed expectations and lower real yields.",
   },
   {
     id: "PCEPI",
@@ -103,7 +103,7 @@ const FRED_SERIES = [
     mode: "yoy",
     unit: "% YoY",
     goldRule: "inflation",
-    explanation: "PCE is central to Fed inflation monitoring; softer PCE can reduce yield pressure.",
+    explanation: "PCE is the Fed preferred inflation gauge. Lower PCE can reduce yield pressure and support gold through easier financial conditions.",
   },
   {
     id: "PCEPILFE",
@@ -112,7 +112,7 @@ const FRED_SERIES = [
     mode: "yoy",
     unit: "% YoY",
     goldRule: "inflation",
-    explanation: "Core PCE is a key Fed-preferred inflation signal; cooling core PCE may support gold via lower yields.",
+    explanation: "Core PCE is the most Fed-sensitive inflation signal. Cooling core PCE is one of the clearest paths to rate-cut expectations.",
   },
   {
     id: "UNRATE",
@@ -121,7 +121,7 @@ const FRED_SERIES = [
     mode: "level",
     unit: "%",
     goldRule: "unemployment",
-    explanation: "A rising unemployment rate may increase rate-cut expectations and support gold.",
+    explanation: "Rising unemployment can increase rate-cut expectations, lower yields, and support gold. Falling unemployment in a tight labor market is usually gold-negative.",
   },
   {
     id: "PAYEMS",
@@ -130,7 +130,7 @@ const FRED_SERIES = [
     mode: "level",
     unit: "thousand",
     goldRule: "payrolls",
-    explanation: "Strong payroll growth can support USD/yields; labor weakness may support gold.",
+    explanation: "Strong payroll growth supports higher-for-longer, lifts USD and yields, and pressures gold. Weak payrolls support gold through rate-cut expectations.",
   },
   {
     id: "DTWEXBGS",
@@ -139,7 +139,7 @@ const FRED_SERIES = [
     mode: "level",
     unit: "index",
     goldRule: "inverse",
-    explanation: "A stronger dollar usually pressures XAUUSD because gold is dollar-denominated.",
+    explanation: "Gold is priced in USD. A stronger dollar usually pressures XAUUSD; a weaker dollar is usually gold-supportive.",
   },
 ];
 
@@ -1857,32 +1857,400 @@ async function fetchFredAll(apiKey) {
   return { rows, errors };
 }
 
-function classifyArticle(article) {
-  const text = `${article.title || ""} ${article.domain || ""}`.toLowerCase();
-  let category = "general gold";
-  if (/fed|federal reserve|fomc|powell|rate/.test(text)) category = "Fed / rates";
-  else if (/inflation|cpi|ppi|pce/.test(text)) category = "inflation";
-  else if (/dollar|usd|dxy/.test(text)) category = "DXY / dollar";
-  else if (/yield|treasury|real yield/.test(text)) category = "Treasury / real yields";
-  else if (/geopolitical|safe haven|war|conflict/.test(text)) category = "geopolitical risk";
-  else if (/central bank|reserve/.test(text)) category = "central bank buying";
-  else if (/etf|inflow|outflow|fund/.test(text)) category = "ETF flows";
 
-  let impact = "uncertain";
-  if (/safe haven|war|conflict|dovish|rate cut|lower yields|falling dollar|central bank buying/.test(text)) impact = "bullish";
-  if (/higher yields|strong dollar|hawkish|rate hike|strong jobs|risk appetite/.test(text)) impact = impact === "bullish" ? "uncertain" : "bearish";
+const RETAIL_NOISE_PATTERNS = [
+  /gold rate today/i,
+  /\d{1,2}k gold/i,
+  /city.?wise/i,
+  /dubai.*gold|gold.*dubai/i,
+  /saudi.*gold|gold.*saudi/i,
+  /india.*gold rate|gold rate.*india/i,
+  /uae.*gold|gold.*uae/i,
+  /qatar.*gold|gold.*qatar/i,
+  /oman.*gold|gold.*oman/i,
+  /should you buy.*gold/i,
+  /gold.*cheaper in/i,
+  /bullion.*near record high.*buy/i,
+  /\(otcmkts:/i,
+  /trading (up|down) \d+%/i,
+  /analyst.*rating/i,
+  /stock.*target price/i,
+  /gold corporation|gold mining.*inc/i,
+  /kinross|barrick|newmont|agnico|wheaton|pan american/i,
+];
+
+const HIGH_TIER_DOMAINS = [
+  "reuters.com", "bloomberg.com", "ft.com", "wsj.com", "marketwatch.com",
+  "cnbc.com", "federalreserve.gov", "bls.gov", "bea.gov", "eia.gov",
+  "treasury.gov", "bis.org", "imf.org", "worldbank.org", "ecb.europa.eu",
+];
+
+const LOW_TIER_DOMAINS = [
+  "insidermonkey.com", "newsx.com", "dailypolitical.com", "otcmkts",
+  "seekingalpha.com", "zerohedge.com", "goldprice.org", "kitco.com",
+];
+
+const MACRO_GOLD_DRIVERS = {
+  fed: /fed\b|federal reserve|fomc|powell|rate (cut|hike|hold|pause)|hawkish|dovish|dot plot|monetary policy/i,
+  yields: /treasury yield|10.year yield|2.year yield|real yield|tips|yield curve|bond (market|sell)/i,
+  dollar: /dollar index|dxy|usd (strength|weakness|rally|drop)|dollar (rallies|falls|weakens|strengthens)/i,
+  inflation: /\bcpi\b|consumer price|pce|core inflation|inflation (data|report|print|expectations)|disinflation|deflation/i,
+  labor: /nonfarm payroll|nfp|employment (report|data|situation)|unemployment|jobless|labor market|payrolls/i,
+  geopolitical: /geopolit|war|conflict|sanctions|middle east|safe haven|risk off|flight to safety/i,
+  centralBank: /central bank (buying|reserves)|gold reserves|china.*gold|russia.*gold/i,
+  etf: /gold etf|gld\b|iau\b|etf (inflow|outflow)|fund flow/i,
+};
+
+function isRetailNoise(article) {
+  const titleRaw = String(article.title || "");
+  const source = String(article.domain || article.source || "").toLowerCase();
+  const isLowTier = LOW_TIER_DOMAINS.some((s) => source.includes(s));
+  const hasRetailTitle = RETAIL_NOISE_PATTERNS.some((p) => p.test(titleRaw));
+  const hasMacroDriver = Object.values(MACRO_GOLD_DRIVERS).some((p) => p.test(titleRaw));
+  if (isLowTier && hasRetailTitle) return true;
+  if (hasRetailTitle && !hasMacroDriver) return true;
+  return false;
+}
+
+
+// ─── v2.31 RATE LIMIT + VALIDATION HELPERS ───────────────────────────────────
+const RATE_LIMIT_MIN_INTERVAL_MS = {
+  fred: 1200,
+  gdelt: 5500,
+};
+
+const LAST_REQUEST_AT_KEY = {
+  fred: "goldscope.v2.rateLimit.fred.lastRequestAt",
+  gdelt: "goldscope.v2.rateLimit.gdelt.lastRequestAt",
+};
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readTs(key) {
+  const n = Number(localStorage.getItem(key) || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+async function rateLimitGuard(provider, extraMs = 0) {
+  const key = LAST_REQUEST_AT_KEY[provider];
+  const minInterval = (RATE_LIMIT_MIN_INTERVAL_MS[provider] || 1000) + extraMs;
+  if (!key) return;
+
+  const last = readTs(key);
+  const now = Date.now();
+  const wait = Math.max(0, minInterval - (now - last));
+  if (wait > 0) await sleep(wait);
+  localStorage.setItem(key, String(Date.now()));
+}
+
+function isHttp429Error(errOrText) {
+  const s = String(errOrText?.message || errOrText || "").toLowerCase();
+  return s.includes("429") || s.includes("too many requests") || s.includes("rate limit");
+}
+
+function cleanAiArtifacts(text) {
+  return String(text || "")
+    .replace(/^\s*器材\s*/g, "")
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
+    .trim();
+}
+
+function extractIsoDatesFromSnapshot(snapshot) {
+  const dates = new Set();
+  function visit(x) {
+    if (!x || typeof x !== "object") return;
+    for (const [k, v] of Object.entries(x)) {
+      if ((k === "date" || k.toLowerCase().includes("date")) && typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) {
+        dates.add(v);
+      } else if (typeof v === "object") {
+        visit(v);
+      }
+    }
+  }
+  visit(snapshot);
+  return dates;
+}
+
+
+function isMiningCompanyOrEquityNews(item) {
+  const title = String(item?.title || "").toLowerCase();
+  const source = String(item?.source || "").toLowerCase();
+  const combined = `${title} ${source}`;
+
+  const equityTerms = [
+    "otcmkts",
+    "nasdaq",
+    "nyse",
+    "tsx",
+    "stock",
+    "shares",
+    "trading down",
+    "trading up",
+    "analyst rating",
+    "price target",
+    "corporation",
+    "inc.",
+    "limited",
+  ];
+
+  const miningNames = [
+    "kinross",
+    "victoria gold",
+    "barrick",
+    "newmont",
+    "agnico",
+    "wheaton",
+    "pan american",
+    "franco-nevada",
+    "gold fields",
+    "anglogold",
+    "yamana",
+    "royal gold",
+  ];
+
+  return equityTerms.some((t) => combined.includes(t)) || miningNames.some((n) => combined.includes(n));
+}
+
+function snapshotHasSpotOrTechnicalPrice(snapshot) {
+  const raw = JSON.stringify(snapshot || {}).toLowerCase();
+  return (
+    raw.includes("technicalcontext") ||
+    raw.includes("spotprice") ||
+    raw.includes("xauusdprice") ||
+    raw.includes("currentprice") ||
+    raw.includes('"support"') ||
+    raw.includes('"resistance"') ||
+    raw.includes("pricelevel")
+  );
+}
+
+function extractMiningNewsTitles(snapshot) {
+  const items = snapshot?.gdeltNews?.items || [];
+  return items
+    .filter(isMiningCompanyOrEquityNews)
+    .map((n) => String(n.title || "").trim())
+    .filter(Boolean);
+}
+
+function validateAiGoldReport(output, snapshot) {
+  const issues = [];
+  const text = String(output || "");
+  const lower = text.toLowerCase();
+
+  // 1) invented numeric thresholds when actual/forecast values are blank
+  const hasBlankEventForecasts = !snapshot?.deterministicScenarioLab?.nextMajor?.forecast && !snapshot?.deterministicScenarioLab?.nextMajor?.actual;
+  const inventedThresholdPatterns = [
+    /\bPAYEMS\s*[<>]\s*\d+/i,
+    /\bNFP\s*[<>]\s*\d+/i,
+    /\bpayrolls?\s*[<>]\s*\d+/i,
+    /\bjobs?\s*[<>]\s*\d+\s*k\b/i,
+    /\bCPI\s*[<>]\s*\d+(\.\d+)?\s*%/i,
+    /\binflation\s*[<>]\s*\d+(\.\d+)?\s*%/i,
+  ];
+  if (hasBlankEventForecasts && inventedThresholdPatterns.some((p) => p.test(text))) {
+    issues.push({
+      severity: "high",
+      code: "invented_numeric_threshold",
+      message: "AI output appears to invent NFP/PAYEMS/CPI thresholds while event forecast/actual values are blank.",
+    });
+  }
+
+  // 2) macro logic contradictions
+  if (/hot cpi[\s\S]{0,90}real yields?\s+fall[\s\S]{0,90}(bearish|gold may fall|gold loses|negative)/i.test(text)) {
+    issues.push({
+      severity: "high",
+      code: "cpi_real_yield_contradiction_1",
+      message: "Hot CPI + falling real yields was described as bearish. It should usually be gold-supportive or ambiguous, not bearish.",
+    });
+  }
+
+  if (/hot cpi[\s\S]{0,90}real yields?\s+ris(e|ing)[\s\S]{0,90}(bullish|gold may rise|gold gains|positive)/i.test(text)) {
+    issues.push({
+      severity: "high",
+      code: "cpi_real_yield_contradiction_2",
+      message: "Hot CPI + rising real yields was described as bullish. It should usually be gold-negative or ambiguous.",
+    });
+  }
+
+  if (/rising real yields?[\s\S]{0,80}(bullish|gold-supportive|support gold|gold may rise)/i.test(text)) {
+    issues.push({
+      severity: "high",
+      code: "real_yield_direction_error",
+      message: "Rising real yields were described as gold-supportive.",
+    });
+  }
+
+  // 3) wrong next event date
+  const nextDate = snapshot?.deterministicScenarioLab?.nextMajor?.date || snapshot?.calendar?.nextMajor?.date;
+  const allDates = extractIsoDatesFromSnapshot(snapshot);
+  const monthDateMatches = [...text.matchAll(/\b(?:Jan|January|Feb|February|Mar|March|Apr|April|May|Jun|June|Jul|July|Aug|August|Sep|September|Oct|October|Nov|November|Dec|December)\s+\d{1,2},\s+20\d{2}\b/g)];
+  if (nextDate && monthDateMatches.length) {
+    const nextDateObj = new Date(`${nextDate}T12:00:00Z`);
+    for (const m of monthDateMatches) {
+      const parsed = new Date(`${m[0]} 12:00:00 UTC`);
+      if (!isNaN(parsed.getTime())) {
+        const iso = parsed.toISOString().slice(0, 10);
+        if (text.slice(Math.max(0, m.index - 80), m.index + 80).toLowerCase().includes("next event") && iso !== nextDate) {
+          issues.push({
+            severity: "high",
+            code: "wrong_next_event_date",
+            message: `AI output gave next-event date ${iso}, but snapshot nextMajor date is ${nextDate}.`,
+          });
+        }
+      }
+    }
+  }
+
+  // 4) avoid-window paraphrase mismatch
+  const avoidWindow = snapshot?.deterministicScenarioLab?.nextMajor?.avoidWindow || snapshot?.calendar?.nextMajor?.avoidWindow || "";
+  if (avoidWindow && avoidWindow.includes("2h before") && avoidWindow.includes("1h after")) {
+    if (/2\s*hours?\s+before\/after|2h\s+before\/after|2\s*hours?\s+before\s+and\s+after/i.test(text)) {
+      issues.push({
+        severity: "medium",
+        code: "avoid_window_mismatch",
+        message: "AI output paraphrased avoid-window as 2h before/after, but snapshot says 2h before and 1h after.",
+      });
+    }
+  }
+
+  // 5) leaked artifacts
+  if (/^\s*器材/.test(text)) {
+    issues.push({
+      severity: "medium",
+      code: "output_artifact",
+      message: "AI output contains non-report artifact text at the beginning.",
+    });
+  }
+
+  // 6) missing end marker
+  if (!text.includes("<END_GOLDSCOPE_REPORT>")) {
+    issues.push({
+      severity: "medium",
+      code: "missing_end_marker",
+      message: "AI output is missing <END_GOLDSCOPE_REPORT>; response may be incomplete.",
+    });
+  }
+
+
+  // 7) instrument guard: mining/equity news must not be treated as XAUUSD move
+  const miningTitles = extractMiningNewsTitles(snapshot);
+  const hasMiningNews = miningTitles.length > 0;
+  if (hasMiningNews) {
+    const stockToSpotPatterns = [
+      /gold price drop/i,
+      /gold prices? (drop|fall|fell|recover|stabilize|rise|rally)/i,
+      /xauusd (drop|fall|fell|recover|stabilize|rise|rally)/i,
+      /spot gold (drop|fall|fell|recover|stabilize|rise|rally)/i,
+      /broader market weakness/i,
+    ];
+    const mentionedCompanyStock = /(victoria gold|kinross|barrick|newmont|otcmkts|corporation|shares|stock|trading down)/i.test(text);
+    const convertedToSpot = stockToSpotPatterns.some((p) => p.test(text));
+
+    if (convertedToSpot && !mentionedCompanyStock) {
+      issues.push({
+        severity: "high",
+        code: "instrument_confusion_mining_stock_vs_xauusd",
+        message: "AI appears to interpret mining-company/equity news as spot gold/XAUUSD price action.",
+      });
+    }
+
+    if (/weak news about a gold price drop/i.test(text)) {
+      issues.push({
+        severity: "high",
+        code: "instrument_confusion_gold_price_drop",
+        message: "AI says 'gold price drop' even though available weak news may be company/retail news, not confirmed XAUUSD price action.",
+      });
+    }
+  }
+
+  // 8) price-level hallucination guard
+  const hasPriceContext = snapshotHasSpotOrTechnicalPrice(snapshot);
+  const priceLevelPatterns = [
+    /\$\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?\s*(?:\/\s*oz|per\s+oz|ounce)?/i,
+    /\b\d{4}(?:\.\d+)?\s*(?:\/\s*oz|per\s+oz|ounce)\b/i,
+    /\b(?:above|below|over|under|breaks?|recover(?:s|ed)? above|falls? below|support|resistance)\s+\$?\s?\d{4}(?:\.\d+)?\b/i,
+  ];
+  if (!hasPriceContext && priceLevelPatterns.some((p) => p.test(text))) {
+    issues.push({
+      severity: "high",
+      code: "invented_price_level",
+      message: "AI output contains price levels/support/resistance language, but snapshot has no spot price or technicalContext.",
+    });
+  }
+
 
   return {
-    id: article.url || `${article.title}-${article.seendate}`,
-    title: article.title || "Untitled",
-    source: article.domain || "GDELT",
+    ok: issues.filter((i) => i.severity === "high").length === 0,
+    issues,
+  };
+}
+
+function formatValidationReport(validation) {
+  if (!validation?.issues?.length) return "AI output validation passed.";
+  return validation.issues
+    .map((i, idx) => `${idx + 1}. [${i.severity.toUpperCase()}] ${i.code}: ${i.message}`)
+    .join("\n");
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+function classifyArticle(article) {
+  const titleRaw = String(article.title || "");
+  const title = titleRaw.toLowerCase();
+  const source = String(article.domain || article.source || "");
+  const sourceLower = source.toLowerCase();
+
+  let sourceTier = "medium";
+  if (HIGH_TIER_DOMAINS.some((d) => sourceLower.includes(d))) sourceTier = "high";
+  else if (LOW_TIER_DOMAINS.some((d) => sourceLower.includes(d))) sourceTier = "low";
+
+  let category = "general gold";
+  let driver = "";
+  if (MACRO_GOLD_DRIVERS.fed.test(title)) { category = "Fed / rates"; driver = "fed"; }
+  else if (MACRO_GOLD_DRIVERS.yields.test(title)) { category = "Treasury / real yields"; driver = "yields"; }
+  else if (MACRO_GOLD_DRIVERS.dollar.test(title)) { category = "DXY / dollar"; driver = "dollar"; }
+  else if (MACRO_GOLD_DRIVERS.inflation.test(title)) { category = "inflation"; driver = "inflation"; }
+  else if (MACRO_GOLD_DRIVERS.labor.test(title)) { category = "labor / NFP"; driver = "labor"; }
+  else if (MACRO_GOLD_DRIVERS.geopolitical.test(title)) { category = "geopolitical risk"; driver = "geopolitical"; }
+  else if (MACRO_GOLD_DRIVERS.centralBank.test(title)) { category = "central bank buying"; driver = "centralBank"; }
+  else if (MACRO_GOLD_DRIVERS.etf.test(title)) { category = "ETF flows"; driver = "etf"; }
+
+  const retail = isRetailNoise(article);
+  let relevance = "low-relevance";
+  if (driver && !retail) relevance = "macro-relevant";
+  else if (!retail && category !== "general gold") relevance = "mixed-relevance";
+
+  let impact = "uncertain";
+  const BULLISH_PATTERNS = /safe haven|war|conflict|geopolit|dovish|rate cut|lower yield|falling dollar|weaker dollar|dollar falls|central bank buying|gold demand|etf inflow|recession|risk.?off|flight to safety/i;
+  const BEARISH_PATTERNS = /hawkish|rate hike|higher.?for.?longer|strong dollar|dollar strength|dollar rallies|higher yield|rising yield|strong jobs|strong payroll|beat.*forecast|above.*expectation/i;
+  if (BULLISH_PATTERNS.test(titleRaw)) impact = "bullish";
+  if (BEARISH_PATTERNS.test(titleRaw)) impact = impact === "bullish" ? "uncertain" : "bearish";
+  if (relevance === "low-relevance") impact = "uncertain";
+
+  let confidence = 50;
+  if (sourceTier === "high" && relevance === "macro-relevant") confidence = 85;
+  else if (sourceTier === "high" && relevance === "mixed-relevance") confidence = 70;
+  else if (sourceTier === "medium" && relevance === "macro-relevant") confidence = 65;
+  else if (sourceTier === "medium") confidence = 55;
+  else confidence = 35;
+
+  return {
+    id: article.url || `${titleRaw}-${article.seendate}`,
+    title: titleRaw || "Untitled",
+    source: article.domain || source || "GDELT",
+    sourceTier,
     url: article.url || "#",
     publishedAt: article.seendate || article.datetime || new Date().toISOString(),
-    summary: article.title || "No summary available.",
+    summary: titleRaw || "No summary available.",
     category,
+    driver,
     impact,
-    confidence: category === "general gold" ? 50 : 70,
+    confidence,
+    relevance,
     freshness: 80,
+    tone: impact === "bullish" ? "positive" : impact === "bearish" ? "negative" : "neutral",
   };
 }
 
@@ -1910,7 +2278,15 @@ async function fetchGdeltNews(settings) {
     throw new Error(`GDELT returned non-JSON text: ${raw.slice(0, 160)}`);
   }
 
-  return (Array.isArray(data.articles) ? data.articles : []).map(classifyArticle);
+  const classified = (Array.isArray(data.articles) ? data.articles : [])
+    .map(classifyArticle)
+    .sort((a, b) => {
+      const order = { "macro-relevant": 0, "mixed-relevance": 1, "low-relevance": 2 };
+      return (order[a.relevance] ?? 2) - (order[b.relevance] ?? 2);
+    });
+
+  const filtered = classified.filter((a) => a.relevance !== "low-relevance");
+  return filtered.length ? filtered : classified.slice(0, 8);
 }
 
 function useStoredSettings() {
@@ -2689,17 +3065,20 @@ export default function App() {
   async function refreshFred() {
     try {
       const cached = JSON.parse(localStorage.getItem(KEYS.fredCache) || "null");
-      if (cached?.rows?.length && Date.now() - cached.savedAt < FRED_CACHE_TTL_MS) {
+      if (cached?.rows?.length && cached.rows.length >= FRED_SERIES.length && Date.now() - cached.savedAt < FRED_CACHE_TTL_MS) {
         setFredRows(cached.rows);
         setHealth((h) => ({
           ...h,
           fred: {
             status: "live",
-            message: `Using cached FRED macro drivers (${cached.rows.length}). ${cacheStatusText(KEYS.fredCache, FRED_CACHE_TTL_MS)}.`,
+            message: `Using cached FRED macro drivers (${cached.rows.length}/${FRED_SERIES.length}). ${cacheStatusText(KEYS.fredCache, FRED_CACHE_TTL_MS)}.`,
             lastFetch: new Date(cached.savedAt).toISOString(),
           },
         }));
         return;
+      }
+      if (cached?.rows?.length && cached.rows.length < FRED_SERIES.length) {
+        localStorage.removeItem(KEYS.fredCache);
       }
     } catch {}
 
@@ -2723,8 +3102,8 @@ export default function App() {
         fred: {
           status: result.errors.length ? "partial" : "live",
           message: result.errors.length
-            ? `Loaded ${result.rows.length} FRED series; ${result.errors.length} failed.`
-            : `Loaded ${result.rows.length} FRED macro drivers.`,
+            ? `Loaded ${result.rows.length}/${FRED_SERIES.length} FRED series; ${result.errors.length} failed: ${result.errors.slice(0, 3).join(" | ")}`
+            : `Loaded ${result.rows.length}/${FRED_SERIES.length} FRED macro drivers.`,
           lastFetch: new Date().toISOString(),
         },
       }));
@@ -4691,7 +5070,7 @@ export default function App() {
 
   function AIScenarioEngine() {
     const [model, setModel] = useState("qwen3:8b");
-    const [models, setModels] = useState(["qwen3:8b"]);
+    const [models, setModels] = useState(["qwen3:8b", "llama3.2:3b", "mistral:7b", "gemma3:4b"]);
     const [proxyStatus, setProxyStatus] = useState("not checked");
     const [ollamaStatus, setOllamaStatus] = useState("not checked");
     const [aiStatus, setAiStatus] = useState("idle");
@@ -5017,6 +5396,12 @@ ${err.message}`);
         ...preliminaryFlags,
         maxRecommendedConfidence: confidenceCapFromContext(buildScenarioModel()?.confidence?.score, preliminaryFlags),
         evidenceLabelRule: "Only items with observed values, actual outcomes, replay records, or live macro-relevant news may be called confirmed. Conditional future events must be labeled unconfirmed/conditional.",
+        instrumentGuard: {
+          goldScopeInstrument: "XAUUSD / spot gold only",
+          miningCompanyNewsCount: newsItems.filter(isMiningCompanyOrEquityNews).length,
+          hasSpotOrTechnicalPrice: false,
+          rule: "Mining-company/equity/retail gold-rate news is not spot gold/XAUUSD price action.",
+        },
       };
 
       return qualityFlags;
@@ -5089,7 +5474,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.29",
+        appVersion: "GoldScope v2.32",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -5161,6 +5546,8 @@ STRICT SOURCE RULES:
 12. Always produce a non-empty answer.
 13. End the report with: <END_GOLDSCOPE_REPORT>
 14. Do not include phrases such as "Okay, the user wants", "Let me", "I need to", "/think", or internal planning text.
+15. Instrument guard: do not treat mining-company stocks, ETF/company shares, OTCMKTS items, or retail gold-rate articles as spot gold/XAUUSD movement.
+16. Do not mention specific price levels, support, resistance, breakout, breakdown, or "recover above/below" unless spotPrice or technicalContext exists in the snapshot.
 
 MACRO LOGIC GUARD:
 Apply these rules unless the GoldScope state explicitly contradicts them:
@@ -5185,10 +5572,13 @@ Before finalizing, check your own answer for these mistakes:
 - Do not turn missing evidence into a strong directional call.
 - Do not use fabricated NFP/CPI/FOMC numbers.
 - Do not create numeric triggers not present in the snapshot.
+- Copy event dates and avoidWindow text exactly from the snapshot; do not paraphrase or infer them.
 - Do not write "Confirmed: Weak NFP" or "Confirmed: Strong NFP" when NFP actual/forecast is blank.
 - Do not overstate low-relevance gold-company or retail gold-price news as macro evidence.
 - Do not call one weak or retail-style macro-tagged article confirmed directional evidence.
 - If contextQualityFlags.newsStrength is weak, label news evidence as weak/limited even if GDELT is live.
+- Do not convert company-stock news such as Kinross, Victoria Gold, Barrick, Newmont, OTCMKTS, stock, shares, trading up/down into XAUUSD price action.
+- Do not invent price levels such as $2,300/oz unless present in the snapshot.
 
 TASK:
 ${modeGuide}
@@ -5225,6 +5615,8 @@ Use this table. In the News row, explicitly mention contextQualityFlags.newsStre
 - Only use triggers logically supported by the snapshot.
 - Use labels: Confirmed evidence / Conditional evidence / Missing evidence.
 - If newsStrength is weak, do not place news under Confirmed evidence; place it under Conditional/Weak supporting evidence.
+- If news is about a gold-mining company, equity ticker, OTCMKTS item, shares, or retail gold rates, say it is not reliable XAUUSD evidence.
+- Do not use support/resistance or specific price levels unless technicalContext or spotPrice exists.
 - Do not label future NFP/CPI/FOMC outcomes as confirmed when actual/forecast values are blank.
 - Include invalidation conditions.
 
@@ -5232,6 +5624,8 @@ Use this table. In the News row, explicitly mention contextQualityFlags.newsStre
 - Only use triggers logically supported by the snapshot.
 - Use labels: Confirmed evidence / Conditional evidence / Missing evidence.
 - If newsStrength is weak, do not place news under Confirmed evidence; place it under Conditional/Weak supporting evidence.
+- If news is about a gold-mining company, equity ticker, OTCMKTS item, shares, or retail gold rates, say it is not reliable XAUUSD evidence.
+- Do not use support/resistance or specific price levels unless technicalContext or spotPrice exists.
 - Do not label future NFP/CPI/FOMC outcomes as confirmed when actual/forecast values are blank.
 - Include invalidation conditions.
 
@@ -5252,7 +5646,7 @@ Use conditional wording:
 - Next event to watch.
 - What to monitor before the event.
 - What to monitor after the event.
-- Mention avoid-window if present in the state.
+- Mention avoid-window exactly as written in the state. Do not rewrite "2h before and 1h after" as "2h before/after".
 
 9. Final research note
 - One short paragraph.
@@ -5349,7 +5743,7 @@ Use conditional wording:
           data?.thinking ||
           "";
 
-        const out = cleanModelOutput(rawOut);
+        const out = cleanAiArtifacts(cleanModelOutput(rawOut));
 
         if (!out.trim()) {
           setAiOutput(`Ollama returned JSON, but no final text content was found after cleaning.
@@ -5361,11 +5755,19 @@ Raw response:
 ${JSON.stringify(data, null, 2)}`);
           setAiStatus("complete but empty");
         } else {
-          setAiOutput(out);
           if (label === "smoke test") {
+            setAiOutput(out);
             setAiStatus(out.trim().toUpperCase() === "OK" ? "smoke test OK" : "smoke test returned non-OK output");
           } else {
-            setAiStatus(out.includes("<END_GOLDSCOPE_REPORT>") ? "complete" : "complete, but end marker missing");
+            const validation = validateAiGoldReport(out, contextSnapshot || buildGoldScopeContextSnapshot());
+            const validationText = formatValidationReport(validation);
+            const decorated = validation.issues.length
+              ? `${out}\n\n---\nAI OUTPUT VALIDATION\n${validationText}`
+              : out;
+            setAiOutput(decorated);
+            setAiStatus(validation.ok
+              ? (out.includes("<END_GOLDSCOPE_REPORT>") ? "complete + validation passed" : "complete, but end marker missing")
+              : "validation failed: review output");
           }
         }
       } catch (err) {
@@ -5407,7 +5809,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.29",
+        appVersion: "GoldScope v2.32",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -5441,7 +5843,7 @@ ${err.stack || err.message || String(err)}`);
     return (
       <div style={{ display: "grid", gap: 16 }}>
         <Card>
-          <Title icon="🤖" title="AI Engine - News Quality Guard" sub="Prompt is generated automatically. No manual prompt editing is needed." />
+          <Title icon="🤖" title="AI Engine - Instrument Guard + Price-Level Validator" sub="Prompt is generated automatically. No manual prompt editing is needed." />
 
           <Card style={{ background: "#170a12", borderColor: "#7f1d1d", marginBottom: 14 }}>
             <b style={{ color: C.red }}>Important:</b>{" "}
@@ -5509,7 +5911,11 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Qwen /no_think: on</Badge>
               <Badge value="supportive">Output cleaner: on</Badge>
               <Badge value="supportive">Confidence cap: on</Badge>
-              <Badge value="supportive">News strength: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
+              <Badge value="supportive">News strength: on</Badge>
+              <Badge value="supportive">Rate limit guard: on</Badge>
+              <Badge value="supportive">AI validator: on</Badge>
+              <Badge value="supportive">Instrument guard: on</Badge>
+              <Badge value="supportive">Price-level validator: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
 

@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.29.1 - Prompt Builder Fix
+title GoldScope v2.32 - Instrument Guard + Price-Level Validator
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.29.1 - Prompt Builder Fix
+echo   GoldScope v2.32 - Instrument Guard + Price-Level Validator
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.
