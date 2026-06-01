@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.33 - Technical Analysis Layer
+title GoldScope v2.33.4 - Validation-Gated Safe Report
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.33 - Technical Analysis Layer
+echo   GoldScope v2.33.4 - Validation-Gated Safe Report
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.

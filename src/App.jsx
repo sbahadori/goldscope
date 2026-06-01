@@ -2166,12 +2166,46 @@ function computeTechnicalContextFromCandles(candles, symbol = "GC=F", timeframe 
   else if (score > 0) bias = "mild-bullish";
   else if (score < 0) bias = "mild-bearish";
 
-  const technicalConfidence = Math.max(20, Math.min(70, 25 + Math.abs(score) * 12 + (c.length >= 200 ? 10 : 0)));
+  const sanityIssues = [];
+  const nonZeroLows = c.map((x) => x.low).filter((x) => Number.isFinite(x) && x > 0);
+  const minLow = nonZeroLows.length ? Math.min(...nonZeroLows) : null;
+
+  if (support.some((x) => !Number.isFinite(x) || x <= 0)) sanityIssues.push("invalid_support_zero_or_negative");
+
+  if (Number.isFinite(price) && Number.isFinite(ema20)) {
+    const d = Math.abs(price - ema20) / Math.max(Math.abs(price), 1);
+    if (d > 0.25) sanityIssues.push("ema20_far_from_price");
+  }
+  if (Number.isFinite(price) && Number.isFinite(ema50)) {
+    const d = Math.abs(price - ema50) / Math.max(Math.abs(price), 1);
+    if (d > 0.35) sanityIssues.push("ema50_far_from_price");
+  }
+  if (Number.isFinite(price) && Number.isFinite(ema200)) {
+    const d = Math.abs(price - ema200) / Math.max(Math.abs(price), 1);
+    if (d > 0.50) sanityIssues.push("ema200_far_from_price");
+  }
+  if (rsi14 === 100 || rsi14 === 0) sanityIssues.push("rsi_extreme_possible_bad_data_or_overextension");
+  if (Number.isFinite(atr14) && Number.isFinite(price) && atr14 / Math.max(Math.abs(price), 1) > 0.05) {
+    sanityIssues.push("atr_unusually_large_relative_to_price");
+  }
+  if (minLow !== null && Number.isFinite(price) && minLow / Math.max(Math.abs(price), 1) < 0.5) {
+    sanityIssues.push("price_series_contains_abnormally_low_candles");
+  }
+
+  const technicalReliability = sanityIssues.length ? "unreliable" : "usable";
+  let technicalConfidence = Math.max(20, Math.min(70, 25 + Math.abs(score) * 12 + (c.length >= 200 ? 10 : 0)));
+
+  if (technicalReliability === "unreliable") {
+    technicalConfidence = Math.min(20, technicalConfidence);
+    bias = bias.includes("bullish") ? "weak/uncertain-bullish" : bias.includes("bearish") ? "weak/uncertain-bearish" : "uncertain";
+  }
 
   return {
     symbol,
     proxy: symbol === "GC=F" ? "Gold futures proxy for XAUUSD; not spot XAUUSD." : "Price proxy",
-    status: "available",
+    status: technicalReliability === "unreliable" ? "unreliable" : "available",
+    reliability: technicalReliability,
+    sanityIssues,
     lastUpdated: c[c.length - 1]?.time || new Date().toISOString(),
     candleCount: c.length,
     timeframes: {
@@ -2186,8 +2220,8 @@ function computeTechnicalContextFromCandles(candles, symbol = "GC=F", timeframe 
         trend,
         momentum,
         priceVsEMA200,
-        support,
-        resistance,
+        support: support.filter((x) => Number.isFinite(x) && x > 0),
+        resistance: resistance.filter((x) => Number.isFinite(x) && x > 0),
         structure: trend === "neutral/range" ? "range/unclear" : trend,
       },
     },
@@ -2196,6 +2230,7 @@ function computeTechnicalContextFromCandles(candles, symbol = "GC=F", timeframe 
     guardrails: [
       "Technical analysis is confirmation/context only; it must not override missing macro/event evidence.",
       "Price levels come from GC=F proxy data, not direct spot XAUUSD.",
+      "If reliability is unreliable, treat technicals as diagnostic only, not scenario evidence.",
     ],
   };
 }
@@ -2232,6 +2267,172 @@ function extractMiningNewsTitles(snapshot) {
     .filter(isMiningCompanyOrEquityNews)
     .map((n) => String(n.title || "").trim())
     .filter(Boolean);
+}
+
+
+function splitReportLines(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function getNextMajorEvent(snapshot) {
+  return snapshot?.deterministicScenarioLab?.nextMajor
+    || snapshot?.calendar?.nextMajor
+    || snapshot?.calendar?.eventRiskSummary?.nextMajor
+    || null;
+}
+
+function monthNameToNumber(name) {
+  const m = String(name || "").toLowerCase().slice(0, 3);
+  return {
+    jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+    jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12",
+  }[m] || null;
+}
+
+function extractHumanDates(text) {
+  const out = [];
+  const s = String(text || "");
+
+  for (const m of s.matchAll(/\b(20\d{2})-(\d{2})-(\d{2})\b/g)) {
+    out.push(`${m[1]}-${m[2]}-${m[3]}`);
+  }
+
+  for (const m of s.matchAll(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2}),?\s+(20\d{2})\b/gi)) {
+    const mm = monthNameToNumber(m[1]);
+    const dd = String(m[2]).padStart(2, "0");
+    if (mm) out.push(`${m[3]}-${mm}-${dd}`);
+  }
+
+  return [...new Set(out)];
+}
+
+function extractNextCatalystBlock(text) {
+  const s = String(text || "");
+  const idx = s.search(/(?:^|\n)\s*(?:9\.\s*)?Next catalyst plan/i);
+  if (idx < 0) return "";
+  const tail = s.slice(idx);
+  const end = tail.search(/(?:^|\n)\s*(?:10\.\s*)?Final research note/i);
+  return end >= 0 ? tail.slice(0, end) : tail;
+}
+
+function normalizeEventName(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function lineStatesBullish(line) {
+  return /\b(bullish|gold may rise|gold could rise|gold may strengthen|gold could strengthen|gold may rebound|gold could rebound|gold-supportive|support gold|supportive)\b/i.test(line);
+}
+
+function lineStatesBearish(line) {
+  return /\b(bearish|gold may fall|gold could fall|gold may weaken|gold could weaken|gold may decline|gold could decline|gold may retreat|gold could retreat|gold-negative|pressure gold|gold may face pressure)\b/i.test(line);
+}
+
+function lineHasStrongNfpRisingYields(line) {
+  return /\b(NFP|labor|payroll|employment)\b/i.test(line)
+    && /\b(strengthens?|strong|stronger)\b/i.test(line)
+    && /\b(yields?\/USD\s+rise|USD\/yields?\s+rise|yields?\s+and\s+USD\s+rise|USD\s+and\s+yields?\s+rise|rising\s+USD\/yields?|rising\s+yields?\/USD)\b/i.test(line);
+}
+
+function lineHasWeakNfpFallingYields(line) {
+  return /\b(NFP|labor|payroll|employment)\b/i.test(line)
+    && /\b(weakens?|weak|weaker)\b/i.test(line)
+    && /\b(yields?\/USD\s+fall|USD\/yields?\s+fall|yields?\s+and\s+USD\s+fall|USD\s+and\s+yields?\s+fall|falling\s+USD\/yields?|falling\s+yields?\/USD)\b/i.test(line);
+}
+
+
+function safeValue(x, fallback = "missing") {
+  return x === undefined || x === null || x === "" ? fallback : x;
+}
+
+function buildValidationSafeGoldReport(snapshot, validation) {
+  const nextMajor = getNextMajorEvent(snapshot) || {};
+  const flags = snapshot?.contextQualityFlags || {};
+  const tech = snapshot?.technicalContext || {};
+  const fredRows = snapshot?.dataReadiness?.fredRows ?? 0;
+  const newsItems = snapshot?.dataReadiness?.newsItems ?? 0;
+  const replayRecords = snapshot?.dataReadiness?.replayRecords ?? 0;
+  const missing = flags.missingCriticalMacroDrivers || [];
+  const maxConf = Number(flags.maxRecommendedConfidence ?? 25);
+  const safeConfidence = Math.min(maxConf, 25);
+
+  const nextName = safeValue(nextMajor.name, "No next major event found");
+  const nextDate = safeValue(nextMajor.date, "missing date");
+  const nextTime = safeValue(nextMajor.time, "missing time");
+  const avoidWindow = safeValue(nextMajor.avoidWindow, "missing avoid-window");
+
+  const techLine = tech.usableForScenario === false || tech.status === "unreliable"
+    ? `Technical context is unreliable/masked and unusable for scenario evidence. Sanity issues: ${(tech.sanityIssues || []).join(", ") || "not specified"}.`
+    : tech.status === "available"
+      ? `Technical context is available and may be used only as confirmation, not as macro override.`
+      : `Technical context is unavailable.`;
+
+  const validationLines = (validation?.issues || [])
+    .map((i, idx) => `${idx + 1}. [${String(i.severity || "").toUpperCase()}] ${i.code}: ${i.message}`)
+    .join("\n");
+
+  return `VALIDATION-GATED SAFE REPORT
+The original AI report was rejected because it failed high-severity validation. The following report is generated deterministically from the GoldScope snapshot.
+
+1. Dominant research scenario
+Wait-Neutral.
+The system should not assign a bullish or bearish research scenario because macro drivers are incomplete, news strength is weak, replay evidence is missing, and event outcomes are still blank. Missing critical macro drivers: ${missing.length ? missing.join(", ") : "none listed"}. Technical context is not usable for scenario evidence.
+
+2. Confidence score
+${safeConfidence}.
+Reason: confidence is capped because source quality is incomplete and high-severity validation errors were detected in the AI output.
+Confidence reducers: incomplete FRED coverage (${fredRows}/11 loaded), newsStrength=${safeValue(flags.newsStrength)}, macroRelevantNewsCount=${safeValue(flags.macroRelevantNewsCount, 0)}, replayRecords=${replayRecords}, technicalStatus=${safeValue(tech.status)}, eventDataCompleteness=${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)}.
+
+3. Evidence table
+| Evidence block | Current state | Gold implication | Reliability |
+|---|---|---|---|
+| Macro | Partial; missing ${missing.length ? missing.join(", ") : "none listed"} | Direction cannot be confirmed | ${safeValue(flags.macroReliability)} |
+| News | ${newsItems} item(s); newsStrength=${safeValue(flags.newsStrength)}; macroRelevantNewsCount=${safeValue(flags.macroRelevantNewsCount, 0)} | Not sufficient for directional confirmation | ${safeValue(flags.newsStrength)} |
+| Calendar/event risk | ${nextName} on ${nextDate} ${nextTime}; forecast/actual fields are missing | Conditional only | ${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)} |
+| Replay evidence | ${replayRecords} replay record(s) | No historical validation | ${safeValue(flags.replayReliability)} |
+| Technical context | ${tech.status === "unreliable" ? "masked/unreliable" : safeValue(tech.status)} | Not usable as directional evidence unless usableForScenario=true | ${safeValue(tech.reliability || tech.status)} |
+| Source/data readiness | FRED rows=${fredRows}; news items=${newsItems}; TradingEconomics/Reddit/YouTube may be missing | Limited source coverage | partial |
+
+4. Bullish case for gold
+Confirmed evidence: none.
+Conditional evidence: if future labor data weakens expectations and yields/USD fall, gold may receive support; if inflation is hot while real yields fall, gold may receive support. These are conditional gates only because actual and forecast values are missing.
+Missing evidence: confirmed labor outcome, confirmed CPI/PCE outcome, complete real-yield and USD drivers, replay evidence, and usable technical confirmation.
+Invalidation conditions: if labor data strengthens expectations and yields/USD rise, or if hot inflation lifts real yields, the bullish case weakens.
+
+5. Bearish case for gold
+Confirmed evidence: none.
+Conditional evidence: if future labor data strengthens expectations and yields/USD rise, gold may face pressure; if inflation is hot and real yields rise, gold may face pressure. These are conditional gates only.
+Missing evidence: confirmed labor outcome, confirmed inflation outcome, complete FRED macro drivers, replay evidence, and usable technical context.
+Invalidation conditions: if labor data weakens expectations and yields/USD fall, or if real yields fall despite hot inflation, the bearish case weakens.
+
+6. Wait/neutral case
+Wait-Neutral is the appropriate state because the snapshot lacks confirmed event outcomes, replay evidence, complete macro drivers, strong macro-relevant news, and usable technical confirmation. The system should wait for actual data and market reaction rather than infer direction.
+
+7. Technical confirmation
+${techLine}
+Technical context must not confirm, weaken, or contradict the macro scenario until usableForScenario=true.
+
+8. Decision gates
+- If NFP materially weakens labor expectations and yields/USD fall, then gold may rise.
+- If NFP strengthens labor expectations and yields/USD rise, then gold may fall.
+- If CPI is hot but real yields fall, then gold may rise.
+- If CPI is hot and real yields rise, then gold may fall.
+- If replay evidence after the event contradicts the expected macro reaction, keep Wait-Neutral.
+
+9. Next catalyst plan
+Next event: ${nextName}.
+Date/time: ${nextDate} ${nextTime}.
+Before: monitor incoming labor expectations, USD, nominal yields, and real yields without inventing forecast values.
+After: compare actual event outcome and market reaction in USD/yields/gold, then store replay evidence.
+Avoid-window: ${avoidWindow}.
+
+10. Final research note
+This report remains Wait-Neutral because the evidence base is incomplete and the rejected AI output contained validation failures. Directional bias should remain blocked until macro drivers, event outcomes, replay evidence, and usable technical context improve. <END_GOLDSCOPE_REPORT>
+
+AI OUTPUT VALIDATION
+${validationLines}`;
 }
 
 function validateAiGoldReport(output, snapshot) {
@@ -2377,6 +2578,121 @@ function validateAiGoldReport(output, snapshot) {
       severity: "high",
       code: "invented_price_level",
       message: "AI output contains price levels/support/resistance language, but snapshot has no spot price or technicalContext.",
+    });
+  }
+  // 9) NFP direction validator - line based
+
+  // 11) technical reliability and EMA logic guard
+  if (snapshot?.technicalContext?.status === "unreliable") {
+    if (/technical context shows[\s\S]{0,120}(bullish|bearish)|mild-bullish bias|mild-bearish bias/i.test(text)) {
+      issues.push({
+        severity: "high",
+        code: "unreliable_technical_used_as_signal",
+        message: "Technical context is marked unreliable but AI used it as directional evidence.",
+      });
+    }
+  }
+
+  if (/EMA20\s+(below|under)\s+EMA200[\s\S]{0,120}(bullish|mild-bullish|supportive)/i.test(text)) {
+    issues.push({
+      severity: "high",
+      code: "ema_alignment_logic_error",
+      message: "EMA20 below EMA200 was described as bullish. This should be mixed/bearish or unreliable, not bullish by itself.",
+    });
+  }
+
+
+
+  // 12) masked technical suppression validator
+  if (snapshot?.technicalContext?.usableForScenario === false || snapshot?.technicalContext?.technicalBias === "masked-unreliable") {
+    const forbiddenMaskedTechnicalUse = [
+      /mild-bullish/i,
+      /mild-bearish/i,
+      /RSI\s*(?:is|=|:)?\s*\d+/i,
+      /EMA\s*(?:alignment|20|50|200)/i,
+      /support\s*(?:level|near|at|\/|and)/i,
+      /resistance\s*(?:level|near|at|\/|and)/i,
+      /price\s+above\s+EMA200/i,
+      /priceVsEMA200/i,
+      /technical context shows[\s\S]{0,120}(bullish|bearish|trend)/i,
+    ];
+
+    if (forbiddenMaskedTechnicalUse.some((p) => p.test(text))) {
+      issues.push({
+        severity: "high",
+        code: "masked_unreliable_technical_leak",
+        message: "AI used raw technical fields even though technicalContext was masked as unusable for scenario analysis.",
+      });
+    }
+  }
+
+
+  // 9) NFP direction validator - line based and precision-safe
+  const reportLines = splitReportLines(text);
+  for (const line of reportLines) {
+    if (lineHasWeakNfpFallingYields(line) && lineStatesBearish(line)) {
+      issues.push({
+        severity: "high",
+        code: "nfp_direction_error_weak_labor",
+        message: "A single line describes weak NFP/labor with falling yields/USD as bearish. It should usually be gold-supportive.",
+      });
+    }
+
+    if (lineHasStrongNfpRisingYields(line) && lineStatesBullish(line)) {
+      issues.push({
+        severity: "high",
+        code: "nfp_direction_error_strong_labor",
+        message: "A single line describes strong NFP/labor with rising yields/USD as bullish. It should usually be gold-negative.",
+      });
+    }
+  }
+
+  // 10) Next catalyst exactness validator
+  const nextMajor = getNextMajorEvent(snapshot);
+  const nextBlock = extractNextCatalystBlock(text);
+  if (nextMajor && nextBlock) {
+    const expectedName = normalizeEventName(nextMajor.name);
+    const expectedDate = nextMajor.date;
+
+    const mentionsWrongFomcAsNext = /next event[\s\S]{0,120}FOMC/i.test(nextBlock)
+      && !/FOMC/i.test(nextMajor.name || "");
+
+    if (mentionsWrongFomcAsNext) {
+      issues.push({
+        severity: "high",
+        code: "wrong_next_catalyst_event",
+        message: `AI named FOMC as the next event, but snapshot nextMajor is ${nextMajor.name}.`,
+      });
+    }
+
+    const blockNorm = normalizeEventName(nextBlock);
+    const expectedTokens = expectedName.split(" ").filter((t) => t.length >= 4);
+    const matchedTokens = expectedTokens.filter((t) => blockNorm.includes(t)).length;
+    if (expectedTokens.length && matchedTokens < Math.min(2, expectedTokens.length)) {
+      issues.push({
+        severity: "medium",
+        code: "next_catalyst_name_not_exact",
+        message: `Next catalyst block does not clearly reference snapshot nextMajor: ${nextMajor.name}.`,
+      });
+    }
+
+    const datesInNextBlock = extractHumanDates(nextBlock);
+    const wrongDates = datesInNextBlock.filter((d) => d !== expectedDate);
+    if (wrongDates.length) {
+      issues.push({
+        severity: "high",
+        code: "wrong_next_catalyst_date",
+        message: `Next catalyst block contains date(s) ${wrongDates.join(", ")} but snapshot nextMajor date is ${expectedDate}.`,
+      });
+    }
+  }
+
+  // 11) invented conceptual examples when forecast/actual are blank
+  if (hasBlankEventForecasts && /\be\.g\.,?\s*(strong payrolls|weak payrolls|rate hikes|rate cuts|NFP beats|FOMC|Employment Report|unemployment rate|wage growth|DGS2-DFF)/i.test(text)) {
+    issues.push({
+      severity: "medium",
+      code: "invented_conceptual_example",
+      message: "AI used conceptual examples not present in snapshot while event actual/forecast data are blank.",
     });
   }
 
@@ -5675,7 +5991,9 @@ ${err.message}`);
         setTechnicalContext(ctx);
         setTechnicalStatus(ctx.status === "available"
           ? `technical context ready: ${ctx.technicalBias} / ${ctx.technicalConfidence}`
-          : `technical context ${ctx.status}: ${ctx.reason || ""}`);
+          : ctx.status === "unreliable"
+            ? `technical context unreliable: ${ctx.sanityIssues?.join(", ") || "sanity issues"}`
+            : `technical context ${ctx.status}: ${ctx.reason || ""}`);
         return ctx;
       } catch (err) {
         const ctx = {
@@ -5693,6 +6011,54 @@ ${err.message}`);
       }
     }
 
+
+    function maskTechnicalContextForPrompt(ctx) {
+      if (!ctx) {
+        return {
+          status: "missing",
+          usableForScenario: false,
+          reason: "Technical context has not been loaded yet.",
+          technicalBias: "unknown",
+          technicalConfidence: 0,
+        };
+      }
+
+      if (ctx.status === "unreliable" || ctx.reliability === "unreliable") {
+        return {
+          symbol: ctx.symbol || "GC=F",
+          proxy: ctx.proxy || "Gold futures proxy for XAUUSD; not spot XAUUSD.",
+          status: "unreliable",
+          reliability: "unreliable",
+          usableForScenario: false,
+          technicalBias: "masked-unreliable",
+          technicalConfidence: Math.min(Number(ctx.technicalConfidence || 0), 20),
+          sanityIssues: ctx.sanityIssues || [],
+          maskedFields: [
+            "raw trend",
+            "raw momentum",
+            "EMA values",
+            "RSI14",
+            "ATR14",
+            "support",
+            "resistance",
+            "priceVsEMA200",
+            "technicalBias"
+          ],
+          diagnosticSummary: "Technical data failed sanity checks. Raw trend/EMA/RSI/support/resistance fields are intentionally masked and must not be used as directional evidence.",
+          guardrails: [
+            "Do not use this technical context as bullish or bearish evidence.",
+            "Do not mention raw mild-bullish/mild-bearish labels from the original technical calculation.",
+            "Treat technicals as unavailable for scenario confirmation until data quality is repaired."
+          ],
+        };
+      }
+
+      return {
+        ...ctx,
+        usableForScenario: ctx.status === "available",
+      };
+    }
+
     function buildGoldScopeContextSnapshot() {
       const scenario = buildScenarioModel();
       const fredCompact = compactFredRows();
@@ -5702,7 +6068,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.33",
+        appVersion: "GoldScope v2.33.4",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -5720,12 +6086,7 @@ ${err.message}`);
         },
         calendar: compactCalendar(),
         replayEvidence: replayCompact,
-        technicalContext: technicalContext || {
-          status: "missing",
-          reason: "Technical context has not been loaded yet. Use Load Technical Context.",
-          technicalBias: "unknown",
-          technicalConfidence: 0,
-        },
+        technicalContext: maskTechnicalContextForPrompt(technicalContext),
         sourceHealth: health,
         contextQualityFlags: qualityFlags,
         dataReadiness: {
@@ -5779,12 +6140,16 @@ STRICT SOURCE RULES:
 10. Future events without actual/forecast values are conditional/unconfirmed, not confirmed.
 11. The confidence score must not exceed contextQualityFlags.maxRecommendedConfidence unless you explicitly justify why the cap should be overridden from the snapshot.
 12. Always produce a non-empty answer.
+12a. If you cannot satisfy these rules, output Wait-Neutral and explicitly say the evidence is insufficient.
 13. End the report with: <END_GOLDSCOPE_REPORT>
 14. Do not include phrases such as "Okay, the user wants", "Let me", "I need to", "/think", or internal planning text.
 15. Instrument guard: do not treat mining-company stocks, ETF/company shares, OTCMKTS items, or retail gold-rate articles as spot gold/XAUUSD movement.
 16. Do not mention specific price levels, support, resistance, breakout, breakdown, or "recover above/below" unless spotPrice or technicalContext exists in the snapshot.
 17. If technicalContext exists, use it only as market-confirmation context. It must not override missing macro/event evidence.
 18. If technicalContext uses GC=F, state that it is a gold futures proxy for XAUUSD, not direct spot XAUUSD.
+19. If technicalContext.status is "unreliable" or technicalContext.usableForScenario is false, do not use it as directional evidence; describe it only as a failed/diagnostic technical read.
+20. Do not describe EMA20 below EMA200 as bullish. Price above EMA200 alone is only mild support and can be contradicted by EMA alignment or overbought RSI.
+21. If technicalContext.usableForScenario is false, do not mention mild-bullish, mild-bearish, RSI, EMA, ATR, support, resistance, or priceVsEMA200 as scenario evidence unless those fields are explicitly present in the masked technicalContext.
 
 MACRO LOGIC GUARD:
 Apply these rules unless the GoldScope state explicitly contradicts them:
@@ -5809,7 +6174,7 @@ Before finalizing, check your own answer for these mistakes:
 - Do not turn missing evidence into a strong directional call.
 - Do not use fabricated NFP/CPI/FOMC numbers.
 - Do not create numeric triggers not present in the snapshot.
-- Copy event dates and avoidWindow text exactly from the snapshot; do not paraphrase or infer them.
+- Copy event dates, nextMajor event name, and avoidWindow text exactly from the snapshot; do not paraphrase or infer them.
 - Do not write "Confirmed: Weak NFP" or "Confirmed: Strong NFP" when NFP actual/forecast is blank.
 - Do not overstate low-relevance gold-company or retail gold-price news as macro evidence.
 - Do not call one weak or retail-style macro-tagged article confirmed directional evidence.
@@ -5817,6 +6182,11 @@ Before finalizing, check your own answer for these mistakes:
 - Do not convert company-stock news such as Kinross, Victoria Gold, Barrick, Newmont, OTCMKTS, stock, shares, trading up/down into XAUUSD price action.
 - Do not invent price levels such as $2,300/oz unless present in the snapshot.
 - If technicalContext.status is available, discuss technicalBias, trend, RSI, ATR, EMA alignment, support/resistance, and priceVsEMA200 as confirmation only.
+- If technicalContext.status is unreliable or usableForScenario is false, explicitly say technical evidence is unreliable/masked and should not affect scenario confidence.
+- When technicalContext.usableForScenario is false, do not infer trend, support/resistance, RSI, EMA alignment, momentum, or technical bias from masked fields.
+- Weak NFP/labor with falling yields/USD is generally gold-supportive; strong NFP/labor with rising yields/USD is generally gold-negative.
+- Do not use invented examples after "e.g." when forecast/actual values are blank.
+- The Next catalyst plan must use deterministicScenarioLab.nextMajor/calendar.nextMajor exactly. Do not replace it with a later FOMC/CPI/PCE event.
 
 TASK:
 ${modeGuide}
@@ -5874,7 +6244,8 @@ Use this table. In the News row, explicitly mention contextQualityFlags.newsStre
 
 7. Technical confirmation
 - If technicalContext is available, summarize trend, EMA alignment, RSI14, ATR14, support/resistance and technicalBias.
-- Explain whether technical context confirms, weakens, or contradicts the macro scenario.
+- If technicalContext.status is unreliable or usableForScenario is false, say it is unreliable/masked and do not use it as directional evidence.
+- Explain whether technical context confirms, weakens, or contradicts the macro scenario only when usableForScenario is true.
 - If technicalContext is missing/error, say it is unavailable.
 
 8. Decision gates
@@ -5887,7 +6258,7 @@ Use conditional wording:
 - If CPI is hot and real yields rise, then...
 
 9. Next catalyst plan
-- Next event to watch.
+- Next event to watch. Use the exact nextMajor event from the snapshot.
 - What to monitor before the event.
 - What to monitor after the event.
 - Mention avoid-window exactly as written in the state. Do not rewrite "2h before and 1h after" as "2h before/after".
@@ -6003,15 +6374,24 @@ ${JSON.stringify(data, null, 2)}`);
             setAiOutput(out);
             setAiStatus(out.trim().toUpperCase() === "OK" ? "smoke test OK" : "smoke test returned non-OK output");
           } else {
-            const validation = validateAiGoldReport(out, contextSnapshot || buildGoldScopeContextSnapshot());
+            const snapshotForValidation = contextSnapshot || buildGoldScopeContextSnapshot();
+            const validation = validateAiGoldReport(out, snapshotForValidation);
             const validationText = formatValidationReport(validation);
-            const decorated = validation.issues.length
-              ? `${out}\n\n---\nAI OUTPUT VALIDATION\n${validationText}`
-              : out;
-            setAiOutput(decorated);
-            setAiStatus(validation.ok
-              ? (out.includes("<END_GOLDSCOPE_REPORT>") ? "complete + validation passed" : "complete, but end marker missing")
-              : "validation failed: review output");
+            const highSeverity = validation.issues.some((i) => i.severity === "high");
+
+            if (highSeverity) {
+              const safeReport = buildValidationSafeGoldReport(snapshotForValidation, validation);
+              setAiOutput(safeReport);
+              setAiStatus("AI rejected: safe report generated");
+            } else {
+              const decorated = validation.issues.length
+                ? `${out}\n\n---\nAI OUTPUT VALIDATION\n${validationText}`
+                : out;
+              setAiOutput(decorated);
+              setAiStatus(validation.ok
+                ? (out.includes("<END_GOLDSCOPE_REPORT>") ? "complete + validation passed" : "complete, but end marker missing")
+                : "validation warning: review output");
+            }
           }
         }
       } catch (err) {
@@ -6056,7 +6436,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.33",
+        appVersion: "GoldScope v2.33.4",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -6090,7 +6470,7 @@ ${err.stack || err.message || String(err)}`);
     return (
       <div style={{ display: "grid", gap: 16 }}>
         <Card>
-          <Title icon="🤖" title="AI Engine - Technical Analysis Layer" sub="Prompt is generated automatically. No manual prompt editing is needed." />
+          <Title icon="🤖" title="AI Engine - Validation-Gated Safe Report" sub="Prompt is generated automatically. No manual prompt editing is needed." />
 
           <Card style={{ background: "#170a12", borderColor: "#7f1d1d", marginBottom: 14 }}>
             <b style={{ color: C.red }}>Important:</b>{" "}
@@ -6164,7 +6544,17 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">AI validator: on</Badge>
               <Badge value="supportive">Instrument guard: on</Badge>
               <Badge value="supportive">Price-level validator: on</Badge>
-              <Badge value="supportive">Technical layer: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
+              <Badge value="supportive">Technical layer: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
+              <Badge value="supportive">Event validator: on</Badge>
+              <Badge value="supportive">Line-based NFP validator: on</Badge>
+              <Badge value="supportive">Validation gate: on</Badge>
+              <Badge value="supportive">Safe report: on</Badge>
+              <Badge value="supportive">Technical sanity: on</Badge>
+              <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
+              <Badge value="supportive">Event validator: on</Badge>
+              <Badge value="supportive">Line-based NFP validator: on</Badge>
+              <Badge value="supportive">Validation gate: on</Badge>
+              <Badge value="supportive">Safe report: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
 
