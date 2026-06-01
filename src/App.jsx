@@ -2835,7 +2835,9 @@ function buildValidationSafeGoldReport(snapshot, validation) {
   const alignmentText = snapshot?.alignmentContext?.explanation || inferMacroTechnicalAlignment(snapshot, techDesc);
   const fredRows = snapshot?.dataReadiness?.fredRows ?? 0;
   const newsItems = snapshot?.dataReadiness?.newsItems ?? 0;
-  const replayRecords = snapshot?.dataReadiness?.replayRecords ?? 0;
+  const replayRecords = snapshot?.dataReadiness?.replayRecords ?? snapshot?.replayEvidence?.count ?? 0;
+  const replaySignal = snapshot?.replayEvidence?.replaySignal || 'missing';
+  const replayAvgQuality = snapshot?.replayEvidence?.summary?.avgQuality || 0;
   const missing = flags.missingCriticalMacroDrivers || [];
   const maxConf = Number(flags.maxRecommendedConfidence ?? 25);
   const safeConfidence = Math.min(maxConf, techDesc.usable ? 25 : 15);
@@ -2859,7 +2861,7 @@ The system should not assign a bullish or bearish research scenario because macr
 2. Confidence score
 ${safeConfidence}.
 Reason: confidence is capped because source quality is incomplete and high-severity validation errors were detected in the AI output.
-Confidence reducers: incomplete FRED coverage (${fredRows}/11 loaded), newsStrength=${safeValue(flags.newsStrength)}, macroRelevantNewsCount=${safeValue(flags.macroRelevantNewsCount, 0)}, replayRecords=${replayRecords}, technicalStatus=${safeValue(tech.status)}, technicalUsable=${safeValue(tech.usableForScenario)}, eventDataCompleteness=${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)}.
+Confidence reducers: incomplete FRED coverage (${fredRows}/11 loaded), newsStrength=${safeValue(flags.newsStrength)}, macroRelevantNewsCount=${safeValue(flags.macroRelevantNewsCount, 0)}, replayRecords=${replayRecords}, replaySignal=${replaySignal}, replayAvgQuality=${replayAvgQuality}, technicalStatus=${safeValue(tech.status)}, technicalUsable=${safeValue(tech.usableForScenario)}, eventDataCompleteness=${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)}.
 
 3. Evidence table
 | Evidence block | Current state | Gold implication | Reliability |
@@ -2867,7 +2869,7 @@ Confidence reducers: incomplete FRED coverage (${fredRows}/11 loaded), newsStren
 | Macro | Partial; missing ${missing.length ? missing.join(", ") : "none listed"} | Direction cannot be confirmed | ${safeValue(flags.macroReliability)} |
 | News | ${newsItems} item(s); newsStrength=${safeValue(flags.newsStrength)}; macroRelevantNewsCount=${safeValue(flags.macroRelevantNewsCount, 0)} | Not sufficient for directional confirmation | ${safeValue(flags.newsStrength)} |
 | Calendar/event risk | ${nextName} on ${nextDate} ${nextTime}; forecast/actual fields are missing | Conditional only | ${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)} |
-| Replay evidence | ${replayRecords} replay record(s) | No historical validation | ${safeValue(flags.replayReliability)} |
+| Replay evidence | ${replayRecords} replay record(s); signal=${replaySignal}; avgQuality=${replayAvgQuality} | ${replayRecords ? 'Historical market-reaction context available, but must be compared carefully' : 'No historical validation'} | ${safeValue(flags.replayReliability)} |
 | Technical context | ${techDesc.evidenceRowState} | ${techDesc.implication} | ${techDesc.reliability} |
 | Source/data readiness | FRED rows=${fredRows}; news items=${newsItems}; TradingEconomics/Reddit/YouTube may be missing | Limited source coverage | partial |
 
@@ -2886,7 +2888,7 @@ Missing evidence: confirmed labor outcome, confirmed inflation outcome, complete
 Invalidation conditions: if labor data weakens expectations and yields/USD fall, or if real yields fall despite hot inflation, the bearish case weakens.
 
 6. Wait/neutral case
-Wait-Neutral is the appropriate state because the snapshot lacks confirmed event outcomes, replay evidence, complete macro drivers, and strong macro-relevant news. ${techDesc.usable ? "Technical context is available, but it is only confirmation context and cannot override missing macro/event evidence. " + alignmentText : "Technical context is not usable as confirmation."}
+Wait-Neutral is the appropriate state because the snapshot lacks confirmed event outcomes, complete macro drivers, and strong macro-relevant news. Replay evidence status: ${replayRecords ? `${replayRecords} record(s), signal=${replaySignal}, avgQuality=${replayAvgQuality}` : 'missing'}. ${techDesc.usable ? "Technical context is available, but it is only confirmation context and cannot override missing macro/event evidence. " + alignmentText : "Technical context is not usable as confirmation."}
 
 7. Technical confirmation
 ${techDesc.section}
@@ -4256,22 +4258,13 @@ export default function App() {
   const filteredNews = newsFilter === "all" ? news : news.filter((n) => n.impact === newsFilter);
 
   const tabs = [
-    ["control", "Control Center"],
-    ["overview", "Overview"],
-    ["chart", "Live Chart"],
-    ["news", "News Intelligence"],
-    ["macro", "FRED Macro Drivers"],
-    ["calendar", "Macro Calendar"],
-    ["eventRisk", "Event Risk"],
-    ["eventResults", "Event Results (Optional)"],
-    ["eventReplay", "Event Replay"],
-    ["autoPostEvent", "Auto Tracker (Optional)"],
-    ["postEvent", "Post-Event Tracker"],
-    ["bias", "Bias Engine"],
-    ["scenarioLab", "Scenario Lab"],
-    ["aiEngine", "AI Engine"],
-    ["health", "Source Health"],
-    ["export", "Export / BI"],
+    ["control", "Home"],
+    ["chart", "Chart"],
+    ["eventRisk", "Events"],
+    ["scenarioLab", "Scenario"],
+    ["aiEngine", "AI Analysis"],
+    ["health", "Health"],
+    ["export", "Export"],
     ["settings", "Settings"],
   ];
 
@@ -5038,6 +5031,194 @@ export default function App() {
   }
 
   function EventReplayTracker() {
+
+
+    const MANUAL_REPLAY_KEY = "goldscope.manualReplayRecords.v1";
+    const MANUAL_REPLAY_ANCHOR_KEY = "goldscope.manualReplayAnchor.v1";
+    const [manualReplayRefresh, setManualReplayRefresh] = useState(0);
+
+    function readManualReplayRecords() {
+      try {
+        const raw = localStorage.getItem(MANUAL_REPLAY_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function writeManualReplayRecords(records) {
+      localStorage.setItem(MANUAL_REPLAY_KEY, JSON.stringify((records || []).slice(-200)));
+    }
+
+    function getManualReplayStatus() {
+      try {
+        return localStorage.getItem("goldscope.manualReplayStatus.v1") || "manual replay idle";
+      } catch {
+        return "manual replay idle";
+      }
+    }
+
+    function setManualReplayStatus(msg) {
+      try {
+        localStorage.setItem("goldscope.manualReplayStatus.v1", msg);
+      } catch {}
+      setManualReplayRefresh((x) => x + 1);
+    }
+
+    function readReplaySnapshotSafely() {
+      try {
+        const raw = localStorage.getItem("goldscope.latestSnapshot.v1");
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function extractReplayTechnicalFromSnapshot(snapshot) {
+      const tech = snapshot?.technicalContext || {};
+      const tfKey = tech?.timeframes ? Object.keys(tech.timeframes)[0] : null;
+      const tf = tfKey ? tech.timeframes[tfKey] : null;
+      return {
+        status: tech.status || "missing",
+        usableForScenario: tech.usableForScenario || false,
+        technicalBias: tech.technicalBias || "unknown",
+        technicalConfidence: tech.technicalConfidence || 0,
+        multiTimeframe: tech.multiTimeframe || null,
+        sourceSelection: tech.sourceSelection?.selected || null,
+        selectedTimeframe: tfKey,
+        selectedBlock: tf || null,
+        goldPrice: tf?.lastPrice || "",
+      };
+    }
+
+    function manualReplayMove(before, after, epsilon = 0.0005) {
+      const b = Number(before);
+      const a = Number(after);
+      if (!Number.isFinite(b) || !Number.isFinite(a) || Math.abs(b) < 1e-9) {
+        return { change: null, pct: null, direction: "unknown" };
+      }
+      const change = a - b;
+      const pct = change / Math.abs(b);
+      return {
+        change: Number(change.toFixed(4)),
+        pct: Number((pct * 100).toFixed(4)),
+        direction: pct > epsilon ? "up" : pct < -epsilon ? "down" : "flat",
+      };
+    }
+
+    function classifyManualReplay(move) {
+      if (move.direction === "up") return { label: "gold_supportive_reaction", bias: "bullish_reaction", summary: "Gold proxy rose after the anchor." };
+      if (move.direction === "down") return { label: "gold_negative_reaction", bias: "bearish_reaction", summary: "Gold proxy fell after the anchor." };
+      if (move.direction === "flat") return { label: "muted_reaction", bias: "neutral_reaction", summary: "Gold proxy reaction was muted." };
+      return { label: "insufficient_reaction_data", bias: "unknown", summary: "Not enough before/after price data." };
+    }
+
+    function getReplayEventFromSnapshot(snapshot) {
+      return snapshot?.calendar?.nextMajor
+        || snapshot?.deterministicScenarioLab?.nextMajor
+        || snapshot?.calendar?.upcomingHighImpact?.[0]
+        || null;
+    }
+
+    function captureManualPreEventAnchor() {
+      const snapshot = readReplaySnapshotSafely();
+      if (!snapshot) {
+        setManualReplayStatus("No snapshot found. Go to AI Engine, click Preview Prompt once, then return here.");
+        return;
+      }
+      const tech = extractReplayTechnicalFromSnapshot(snapshot);
+      if (tech.status !== "available") {
+        setManualReplayStatus("Latest snapshot has no available technical context. In AI Engine, load technical context and Preview Prompt first.");
+        return;
+      }
+      const event = getReplayEventFromSnapshot(snapshot);
+      if (!event) {
+        setManualReplayStatus("No nextMajor event found in latest snapshot.");
+        return;
+      }
+      const anchor = {
+        capturedAt: new Date().toISOString(),
+        snapshotGeneratedAt: snapshot.generatedAt || "",
+        event: {
+          id: event.id || "",
+          name: event.name || "",
+          date: event.date || "",
+          time: event.time || "",
+          category: event.category || "",
+          importance: event.importance || "",
+          source: event.source || "",
+          avoidWindow: event.avoidWindow || "",
+        },
+        before: {
+          goldPrice: tech.goldPrice || "",
+          usdIndex: "",
+          nominalYield: "",
+          realYield: "",
+        },
+        technicalBefore: tech,
+      };
+      localStorage.setItem(MANUAL_REPLAY_ANCHOR_KEY, JSON.stringify(anchor));
+      setManualReplayStatus(`Pre-event anchor captured from latest snapshot for ${event.name || event.id}.`);
+    }
+
+    function saveManualPostEventReplay() {
+      const snapshot = readReplaySnapshotSafely();
+      if (!snapshot) {
+        setManualReplayStatus("No latest snapshot found. Go to AI Engine and click Preview Prompt after refreshing technical context.");
+        return;
+      }
+      const raw = localStorage.getItem(MANUAL_REPLAY_ANCHOR_KEY);
+      if (!raw) {
+        setManualReplayStatus("No anchor found. Click Capture Pre-Event Anchor first.");
+        return;
+      }
+      const anchor = JSON.parse(raw);
+      const technicalAfter = extractReplayTechnicalFromSnapshot(snapshot);
+      if (technicalAfter.status !== "available") {
+        setManualReplayStatus("Latest snapshot has no available technical context. Refresh technical context and Preview Prompt first.");
+        return;
+      }
+      const goldMove = manualReplayMove(anchor?.before?.goldPrice, technicalAfter.goldPrice);
+      const classification = classifyManualReplay(goldMove);
+      const record = {
+        id: `manual-replay-${Date.now()}`,
+        createdAt: new Date().toISOString(),
+        event: anchor.event || {},
+        before: anchor.before || {},
+        after: {
+          goldPrice: technicalAfter.goldPrice || "",
+          usdIndex: "",
+          nominalYield: "",
+          realYield: "",
+        },
+        reactions: {
+          gold: goldMove,
+          usd: { change: null, pct: null, direction: "unknown" },
+          nominalYield: { change: null, pct: null, direction: "unknown" },
+          realYield: { change: null, pct: null, direction: "unknown" },
+        },
+        reactionClassification: classification,
+        technicalBefore: anchor.technicalBefore || null,
+        technicalAfter,
+        qualityScore: anchor?.before?.goldPrice && technicalAfter.goldPrice ? 45 : 20,
+        notes: "Manual replay record from Event Replay tab using latest stored GoldScope snapshot. USD/yield fields are placeholders.",
+      };
+      writeManualReplayRecords([...readManualReplayRecords(), record]);
+      setManualReplayStatus(`Replay saved: ${classification.label}, quality=${record.qualityScore}.`);
+    }
+
+    function clearManualReplayRecords() {
+      localStorage.removeItem(MANUAL_REPLAY_KEY);
+      localStorage.removeItem(MANUAL_REPLAY_ANCHOR_KEY);
+      setManualReplayStatus("Manual replay records and anchor cleared.");
+    }
+
+    const manualReplayRecords = readManualReplayRecords();
+    const manualReplayStatus = getManualReplayStatus();
+
+
+
     const [replayFilter, setReplayFilter] = useState("completed");
 
     const replayableEvents = calendarUniverse
@@ -5130,6 +5311,14 @@ export default function App() {
       };
       return (
         <Card style={{ background: C.card, borderColor: `${C.blue}55` }}>
+              <div style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 12, padding: 12, marginBottom: 12 }}>
+                <b>v2.36 replay evidence workflow:</b>
+                <div style={{ color: C.muted, lineHeight: 1.7 }}>
+                  Use this tab for event replay work. First prepare/load technical context from AI Engine, then use replay tools here if available.
+                  If this tab does not show capture buttons yet, use the existing post-event/event replay controls in this tab and then return to AI Engine.
+                </div>
+              </div>
+
           <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
             <div>
               <h3 style={{ margin: "0 0 6px", color: C.gold }}>{identity.title}</h3>
@@ -5237,10 +5426,10 @@ export default function App() {
     return (
       <div style={{ display: "grid", gridTemplateColumns: "1fr .85fr", gap: 16 }}>
         <Card>
-          <Title icon="🔁" title="Event Replay Tracker" sub="Reconstructs post-event reaction from historical intraday data. No manual timing needed." />
+          <Title icon="🔁" title="Event Replay Tracker" sub="Advanced post-event reconstruction. Not part of the normal daily workflow." />
 
           <Card style={{ background: "#102016", borderColor: "#166534", marginBottom: 14 }}>
-            <b style={{ color: C.green }}>Better approach:</b>{" "}
+            <b style={{ color: C.green }}>Post-event only:</b>{" "}
             <span style={{ color: C.muted }}>
               Instead of relying on exact pre/+15/+60 clicks, this module waits until after the event and reconstructs the T-15m pre-event baseline plus T+15m and T+60m post-event points from historical intraday data.
             </span>
@@ -5252,8 +5441,7 @@ export default function App() {
               Historical intraday availability is provider-dependent and not guaranteed forever. For robust production, store market data continuously in the BI/DataOps backend.
             </span>
           </Card>
-
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+<div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
             <button onClick={replayAllRecent} style={btn(false)}>Replay recent completed events</button>
             <button onClick={() => setReplayRecords([])} style={btn(false)}>Clear replay records</button>
             <Badge value="blue">{replayStatus}</Badge>
@@ -6056,7 +6244,7 @@ export default function App() {
     return (
       <div style={{ display: "grid", gridTemplateColumns: "1fr .85fr", gap: 16 }}>
         <Card>
-          <Title icon="🎛️" title="GoldScope Control Center" sub="Use this page first. It reduces the need to jump across many tabs." />
+          <Title icon="🎛️" title="GoldScope Home" sub="Use this page first. Most work should start and end here." />
 
           <Card style={{ background: "#102016", borderColor: "#166534", marginBottom: 14 }}>
             <b style={{ color: C.green }}>Simplified workflow:</b>{" "}
@@ -6095,7 +6283,7 @@ export default function App() {
             <StepCard
               number="1"
               title="Daily research refresh"
-              desc="Optional manual shortcut. Smart Analysis already does this for you."
+              desc="Daily default. This refreshes the research state."
               action={runDailyRefresh}
               button="Run daily refresh"
               secondary={<button onClick={() => setTab("scenarioLab")} style={btn(false)}>Open Scenario Lab</button>}
@@ -6113,7 +6301,7 @@ export default function App() {
             <StepCard
               number="3"
               title="After a major event"
-              desc="Optional manual shortcut. Smart Analysis runs this automatically if completed events are replay-ready."
+              desc="Use only after a high-impact event has passed. This reconstructs post-event evidence if a completed event is available."
               action={runPostEventUpdate}
               button="Run post-event update"
               secondary={<button onClick={() => setTab("eventResults")} style={btn(false)}>Optional enrichment</button>}
@@ -6122,7 +6310,7 @@ export default function App() {
             <StepCard
               number="4"
               title="Optional AI scenario analysis"
-              desc="Send the current GoldScope state to your selected free/low-cost model for deeper scenario reasoning. API key is session-only."
+              desc="Optional deeper explanation from the local/free AI model. Use after Home is updated."
               action={() => setTab("aiEngine")}
               button="Open AI Engine"
               secondary={<Badge value="blue">optional</Badge>}
@@ -6153,7 +6341,7 @@ export default function App() {
           </Card>
 
           <Card>
-            <Title icon="🧭" title="What should I do now?" sub="System recommendation." />
+            <Title icon="🧭" title="What should I do now?" sub="Follow only this recommendation. Ignore advanced tabs unless needed." />
             {replayReadyEvents.length > 0 ? (
               <Card style={{ background: "#171008", borderColor: "#92400e" }}>
                 <b style={{ color: C.gold }}>Run market-reaction replay</b>
@@ -6176,8 +6364,7 @@ export default function App() {
           <Card>
             <Title icon="⚙️" title="Advanced tabs" sub="You usually do not need these every day." />
             <p style={{ color: C.muted, lineHeight: 1.7 }}>
-              Macro Calendar is mainly for checking dates. Event Results is optional enrichment, not a required step. Auto Tracker is optional/experimental.
-              For now all tabs remain visible for stability, but the normal workflow should start here, in Control Center.
+              Advanced research/debug pages are hidden from the main navigation to keep the workflow simple. Use Home, Events, Scenario, and AI Analysis for normal work. Detailed pages still exist internally and can be reached from action buttons when needed.
             </p>
           </Card>
 
@@ -6840,6 +7027,263 @@ ${err.message}`);
       return next;
     }
 
+
+    const REPLAY_STORAGE_KEY = "goldscope.eventReplayRecords.v1";
+
+    function readReplayRecords() {
+      try {
+        const raw = localStorage.getItem(REPLAY_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function writeReplayRecords(records) {
+      try {
+        localStorage.setItem(REPLAY_STORAGE_KEY, JSON.stringify((records || []).slice(-200)));
+      } catch (err) {
+        console.warn("Failed to write replay records", err);
+      }
+    }
+
+    function getReplayEvidenceSnapshot() {
+      const records = readReplayRecords();
+      const sorted = records.filter(Boolean).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+      const recent = sorted.slice(0, 10);
+      const classified = recent.map((r) => r?.reactionClassification?.bias).filter(Boolean);
+      const bullishCount = classified.filter((x) => x === "bullish_reaction").length;
+      const bearishCount = classified.filter((x) => x === "bearish_reaction").length;
+      const contradictoryCount = classified.filter((x) => String(x).includes("contradictory")).length;
+      let replaySignal = "missing";
+      if (recent.length) {
+        if (bullishCount > bearishCount && bullishCount >= 2) replaySignal = "bullish_reaction_pattern";
+        else if (bearishCount > bullishCount && bearishCount >= 2) replaySignal = "bearish_reaction_pattern";
+        else if (contradictoryCount >= 2) replaySignal = "contradictory_pattern";
+        else replaySignal = "limited_mixed";
+      }
+      return {
+        latest: sorted[0] || null,
+        recent,
+        count: sorted.length,
+        replaySignal,
+        summary: {
+          bullishCount,
+          bearishCount,
+          contradictoryCount,
+          avgQuality: recent.length ? Number((recent.reduce((a, b) => a + Number(b.qualityScore || 0), 0) / recent.length).toFixed(1)) : 0,
+        },
+      };
+    }
+
+    function inferReplayMove(before, after, epsilon = 0.0005) {
+      const b = Number(before);
+      const a = Number(after);
+      if (!Number.isFinite(b) || !Number.isFinite(a) || Math.abs(b) < 1e-9) return { change: null, pct: null, direction: "unknown" };
+      const change = a - b;
+      const pct = change / Math.abs(b);
+      return {
+        change: Number(change.toFixed(4)),
+        pct: Number((pct * 100).toFixed(4)),
+        direction: pct > epsilon ? "up" : pct < -epsilon ? "down" : "flat",
+      };
+    }
+
+    function classifyReplayReaction(reactions) {
+      const g = reactions?.gold?.direction;
+      if (g === "up") return { label: "gold_supportive_reaction", bias: "bullish_reaction", summary: "Gold proxy rose after the event anchor." };
+      if (g === "down") return { label: "gold_negative_reaction", bias: "bearish_reaction", summary: "Gold proxy fell after the event anchor." };
+      if (g === "flat") return { label: "muted_reaction", bias: "neutral_reaction", summary: "Gold proxy reaction was muted." };
+      return { label: "insufficient_reaction_data", bias: "unknown", summary: "Not enough before/after data to classify reaction." };
+    }
+
+    function capturePreEventReplayAnchor() {
+      const event = calendar?.nextMajor || calendar?.eventRiskSummary?.nextMajor || null;
+      if (!event) {
+        setReplayStatus("No next major event available to anchor.");
+        return null;
+      }
+      if (!technicalContext || technicalContext.status === "missing" || String(technicalStatus || "").toLowerCase().includes("loading")) {
+        setReplayStatus("Load technical context first and wait until it is ready before capturing anchor.");
+        return null;
+      }
+      const tfKey = technicalContext?.timeframes ? Object.keys(technicalContext.timeframes)[0] : null;
+      const tf = tfKey ? technicalContext.timeframes[tfKey] : null;
+      const anchor = {
+        event,
+        capturedAt: new Date().toISOString(),
+        before: {
+          goldPrice: tf?.lastPrice || "",
+          usdIndex: "",
+          nominalYield: "",
+          realYield: "",
+        },
+        technicalBefore: {
+          status: technicalContext.status,
+          usableForScenario: technicalContext.usableForScenario,
+          technicalBias: technicalContext.technicalBias,
+          technicalConfidence: technicalContext.technicalConfidence,
+          multiTimeframe: technicalContext.multiTimeframe || null,
+          selectedTimeframe: tfKey,
+          selectedBlock: tf || null,
+        },
+      };
+      localStorage.setItem("goldscope.eventReplayAnchor.v1", JSON.stringify(anchor));
+      setReplayStatus(`Pre-event anchor captured for ${event.name || event.id}.`);
+      return anchor;
+    }
+
+    function saveManualReplayRecord() {
+      try {
+        const anchorRaw = localStorage.getItem("goldscope.eventReplayAnchor.v1");
+        if (!anchorRaw) {
+          setReplayStatus("No pre-event anchor found. Click Capture Pre-Event Anchor first.");
+          return null;
+        }
+        if (!technicalContext || technicalContext.status === "missing" || String(technicalStatus || "").toLowerCase().includes("loading")) {
+          setReplayStatus("Load technical context first and wait until it is ready before saving replay.");
+          return null;
+        }
+        const anchor = JSON.parse(anchorRaw);
+        const event = anchor.event || calendar?.nextMajor || calendar?.eventRiskSummary?.nextMajor || {};
+        const tfKey = technicalContext?.timeframes ? Object.keys(technicalContext.timeframes)[0] : null;
+        const tf = tfKey ? technicalContext.timeframes[tfKey] : null;
+        const beforeGold = anchor?.before?.goldPrice || "";
+        const afterGold = tf?.lastPrice || "";
+        const reactions = {
+          gold: inferReplayMove(beforeGold, afterGold),
+          usd: inferReplayMove(anchor?.before?.usdIndex, ""),
+          nominalYield: inferReplayMove(anchor?.before?.nominalYield, ""),
+          realYield: inferReplayMove(anchor?.before?.realYield, ""),
+        };
+        const reactionClassification = classifyReplayReaction(reactions);
+        const record = {
+          id: `replay-${event.id || "manual"}-${Date.now()}`,
+          createdAt: new Date().toISOString(),
+          event: {
+            id: event.id || "",
+            name: event.name || "",
+            date: event.date || "",
+            time: event.time || "",
+            category: event.category || "",
+            importance: event.importance || "",
+            source: event.source || "",
+          },
+          eventOutcome: {
+            previous: event.previous || "",
+            forecast: event.forecast || "",
+            actual: event.actual || "",
+            surpriseDirection: "",
+            notes: "Manual replay record; event actual/forecast can be extended later.",
+          },
+          before: anchor.before || {},
+          after: {
+            goldPrice: afterGold,
+            usdIndex: "",
+            nominalYield: "",
+            realYield: "",
+          },
+          reactions,
+          reactionClassification,
+          technicalBefore: anchor.technicalBefore || null,
+          technicalAfter: {
+            status: technicalContext.status,
+            usableForScenario: technicalContext.usableForScenario,
+            technicalBias: technicalContext.technicalBias,
+            technicalConfidence: technicalContext.technicalConfidence,
+            multiTimeframe: technicalContext.multiTimeframe || null,
+            selectedTimeframe: tfKey,
+            selectedBlock: tf || null,
+          },
+          qualityScore: beforeGold && afterGold ? 45 : 20,
+          notes: "Saved from GoldScope Replay UI.",
+        };
+        const records = readReplayRecords();
+        writeReplayRecords([...records, record]);
+        const snapshot = getReplayEvidenceSnapshot();
+        setReplayEvidence(snapshot);
+        setReplayStatus(`Replay record saved: ${record.reactionClassification.label}, quality=${record.qualityScore}.`);
+        return record;
+      } catch (err) {
+        setReplayStatus(`Replay save failed: ${err.message}`);
+        return null;
+      }
+    }
+
+    function clearReplayRecords() {
+      writeReplayRecords([]);
+      localStorage.removeItem("goldscope.eventReplayAnchor.v1");
+      const snapshot = getReplayEvidenceSnapshot();
+      setReplayEvidence(snapshot);
+      setReplayStatus("Replay records and anchor cleared.");
+    }
+
+    useEffect(() => {
+      try {
+        setReplayEvidence(getReplayEvidenceSnapshot());
+        setReplayStatus("Replay evidence loaded from local storage.");
+      } catch (err) {
+        setReplayStatus(`Replay evidence load skipped: ${err.message}`);
+      }
+    }, []);
+
+
+    function getManualReplayEvidenceForSnapshot() {
+      try {
+        const raw = localStorage.getItem("goldscope.manualReplayRecords.v1");
+        const parsed = raw ? JSON.parse(raw) : [];
+        const records = Array.isArray(parsed) ? parsed : [];
+        const sorted = records.filter(Boolean).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+        const recent = sorted.slice(0, 10);
+        const classified = recent.map((r) => r?.reactionClassification?.bias).filter(Boolean);
+        const bullishCount = classified.filter((x) => x === "bullish_reaction").length;
+        const bearishCount = classified.filter((x) => x === "bearish_reaction").length;
+        const contradictoryCount = classified.filter((x) => String(x).includes("contradictory")).length;
+        let replaySignal = "missing";
+        if (recent.length) {
+          if (bullishCount > bearishCount && bullishCount >= 2) replaySignal = "bullish_reaction_pattern";
+          else if (bearishCount > bullishCount && bearishCount >= 2) replaySignal = "bearish_reaction_pattern";
+          else replaySignal = "limited_mixed";
+        }
+        return {
+          latest: sorted[0] || null,
+          recent,
+          count: sorted.length,
+          replaySignal,
+          summary: {
+            bullishCount,
+            bearishCount,
+            contradictoryCount,
+            avgQuality: recent.length ? Number((recent.reduce((a, b) => a + Number(b.qualityScore || 0), 0) / recent.length).toFixed(1)) : 0,
+          },
+        };
+      } catch {
+        return { latest: null, recent: [], count: 0, replaySignal: "missing", summary: { bullishCount: 0, bearishCount: 0, contradictoryCount: 0, avgQuality: 0 } };
+      }
+    }
+
+
+    const SNAPSHOT_STORAGE_KEY = "goldscope.latestSnapshot.v1";
+
+    function saveLatestSnapshotForReplay(snapshot) {
+      try {
+        localStorage.setItem(SNAPSHOT_STORAGE_KEY, JSON.stringify(snapshot));
+      } catch (err) {
+        console.warn("Failed to save latest snapshot for replay", err);
+      }
+      return snapshot;
+    }
+
+    function readLatestSnapshotForReplay() {
+      try {
+        const raw = localStorage.getItem(SNAPSHOT_STORAGE_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    }
+
     function buildGoldScopeContextSnapshot() {
       const scenario = buildScenarioModel();
       const fredCompact = compactFredRows();
@@ -6849,7 +7293,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.35.4",
+        appVersion: "GoldScope v2.38",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -6886,7 +7330,7 @@ ${err.message}`);
     }
 
     function buildRealGoldScopePrompt(mode = promptMode) {
-      const snapshot = buildGoldScopeContextSnapshot();
+      const snapshot = saveLatestSnapshotForReplay(buildGoldScopeContextSnapshot());
       const depthGuide = {
         concise: "Keep the response compact. Maximum 500 words. Do not cut off mid-sentence.",
         standard: "Give a practical research report. About 900-1400 words. Complete all sections.",
@@ -6914,7 +7358,7 @@ STRICT SOURCE RULES:
 2. Do not invent actual, forecast, consensus, thresholds, market pricing, or probability values unless explicitly provided.
 3. If forecast/actual values are missing, say they are missing.
 4. If news is fallback, stale, generic, low-relevance, or rate-limited, lower confidence.
-5. If replay evidence is absent, lower confidence.
+5. If replay evidence is absent, lower confidence. If replay evidence is present, use it as historical market-reaction evidence but do not overgeneralize from low-quality or few records.
 6. If macro drivers are incomplete, lower confidence.
 7. If evidence conflicts, prefer Wait-Neutral unless one side has strong multi-source confirmation.
 8. Do not call a scenario trigger "confirmed" unless it has observed values, actual outcomes, replay records, or multiple strong macro-relevant news items.
@@ -6935,6 +7379,7 @@ STRICT SOURCE RULES:
 22. If technicalContext.sourceSelection exists, you may summarize source quality and selected symbol, but do not treat failed/weak sources as evidence.
 23. If technicalContext.multiTimeframe exists, summarize cross-timeframe agreement or conflict.
 24. If alignmentContext exists, use it as the final macro/technical alignment rule; it can confirm, weaken, or contradict, but cannot override missing macro/event/replay evidence.
+25. If replayEvidence.count > 0, summarize latest and recent replay reaction patterns. Treat replay as evidence only when qualityScore is adequate and event context is comparable.
 
 MACRO LOGIC GUARD:
 Apply these rules unless the GoldScope state explicitly contradicts them:
@@ -7225,7 +7670,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.35.4",
+        appVersion: "GoldScope v2.38",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -7259,7 +7704,7 @@ ${err.stack || err.message || String(err)}`);
     return (
       <div style={{ display: "grid", gap: 16 }}>
         <Card>
-          <Title icon="🤖" title="AI Engine - Validation Label + SourceHealth Accuracy" sub="Prompt is generated automatically. No manual prompt editing is needed." />
+          <Title icon="🤖" title="AI Analysis" sub="Optional. Use after Home / Smart Analysis has refreshed the state." />
 
           <Card style={{ background: "#170a12", borderColor: "#7f1d1d", marginBottom: 14 }}>
             <b style={{ color: C.red }}>Important:</b>{" "}
@@ -7267,8 +7712,7 @@ ${err.stack || err.message || String(err)}`);
               Research analysis only. No financial advice, no buy/sell signal, and no broker connection.
             </span>
           </Card>
-
-          <Card style={{ background: C.card2, borderColor: `${proxyStatus.includes("OK") ? C.green : C.gold}66`, marginBottom: 14 }}>
+<Card style={{ background: C.card2, borderColor: `${proxyStatus.includes("OK") ? C.green : C.gold}66`, marginBottom: 14 }}>
             <Title icon="🌉" title="Step 1 - Internal Ollama Proxy" sub="Built into Vite. No separate proxy BAT is needed." />
             <p style={{ color: C.muted, lineHeight: 1.7, marginTop: 0 }}>
               Only run <code>Start-GoldScope-v2.bat</code>. The app uses Vite internal proxy: <code>/api/ollama</code> → <code>http://localhost:11434</code>.
@@ -7322,7 +7766,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="blue">GDELT news: {(news || []).length}</Badge>
               <Badge value="blue">Calendar events: {(calendarUniverse || []).length}</Badge>
               <Badge value="blue">Replay records: {(replayRecords || []).length}</Badge>
-              <Badge value={technicalContext?.status === "available" ? "supportive" : "warning"}>Technical: {technicalContext?.status || "missing"}</Badge>
+              <Badge value="blue">Uses latest AI Engine snapshot</Badge>
               <Badge value="warning">Macro logic guard: on</Badge>
               <Badge value="warning">No invented thresholds: on</Badge>
               <Badge value="supportive">Qwen /no_think: on</Badge>
@@ -7348,6 +7792,16 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Technical fact validator: on</Badge>
               <Badge value="supportive">Source health normalization: on</Badge>
               <Badge value="supportive">Rejected-output label: on</Badge>
+              <Badge value="supportive">Event replay: on</Badge>
+              <Badge value="supportive">Replay storage: local</Badge>
+              <Badge value="supportive">Replay tab workflow: on</Badge>
+              <Badge value="supportive">Manual replay hidden: on</Badge>
+              <Badge value="supportive">Simplified operator UX: on</Badge>
+              <Badge value="supportive">Run readiness gate: on</Badge>
+              <Badge value="supportive">Replay init fix: on</Badge>
+              <Badge value="supportive">AI Engine crash fix: on</Badge>
+              <Badge value="supportive">Simplified nav: on</Badge>
+              <Badge value="supportive">Replay tab crash fix: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
               <Badge value="supportive">Event validator: on</Badge>
@@ -7363,7 +7817,17 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Think-tag rejection: on</Badge>
               <Badge value="supportive">Technical fact validator: on</Badge>
               <Badge value="supportive">Source health normalization: on</Badge>
-              <Badge value="supportive">Rejected-output label: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
+              <Badge value="supportive">Rejected-output label: on</Badge>
+              <Badge value="supportive">Event replay: on</Badge>
+              <Badge value="supportive">Replay storage: local</Badge>
+              <Badge value="supportive">Replay tab workflow: on</Badge>
+              <Badge value="supportive">Manual replay hidden: on</Badge>
+              <Badge value="supportive">Simplified operator UX: on</Badge>
+              <Badge value="supportive">Run readiness gate: on</Badge>
+              <Badge value="supportive">Replay init fix: on</Badge>
+              <Badge value="supportive">AI Engine crash fix: on</Badge>
+              <Badge value="supportive">Simplified nav: on</Badge>
+              <Badge value="supportive">Replay tab crash fix: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
 
@@ -7449,7 +7913,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.24",
+        appVersion: "GoldScope v2.38",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -7652,7 +8116,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.24",
+        appVersion: "GoldScope v2.38",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -7946,14 +8410,14 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.24</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.38</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
               <Badge value={bias.color === C.green ? "bullish" : bias.color === C.red ? "bearish" : "warning"}>{bias.label.replace("Research bias: ", "")}</Badge>
             </div>
             <p style={{ color: C.muted, margin: "7px 0 0", fontSize: 13 }}>
-              XAUUSD research terminal · TradingView chart · GDELT news · stable FRED macro drivers · Real GoldScope Context Prompt fixed · no broker connection · no auto-trading
+              XAUUSD research terminal · simplified workflow · macro + technical + replay-aware scenario lab · no broker connection · no auto-trading
             </p>
           </div>
           <div className="layout-note" style={{ display: "flex", gap: 8 }}>
