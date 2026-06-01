@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.40.4 - RSI Threshold Parser Fix
+title GoldScope v2.40.5 - RSI Numeric Parser Context Isolation
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.40.4 - RSI Threshold Parser Fix
+echo   GoldScope v2.40.5 - RSI Numeric Parser Context Isolation
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.

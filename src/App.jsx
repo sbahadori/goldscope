@@ -3576,38 +3576,41 @@ function collectMentionedRsiNumbers(reportText) {
   const s = String(reportText || "");
   const values = [];
 
-  // Important:
-  // - RSI14 is an indicator name/period, not an RSI numeric value.
-  // - RSI threshold language such as "below 30", "< 30", "above 70", "> 70" is not a reported RSI value.
-  // - Capture only explicit measured RSI values after separators or direct value verbs.
+  // Context-isolated RSI numeric parser.
+  //
+  // This deliberately captures ONLY tight, direct RSI measurements.
+  // It does NOT scan a wide before/after context because that can incorrectly
+  // attach unrelated numbers such as news confidence=65 to nearby RSI words.
+  //
   // Valid measured-value examples:
   //   RSI14=43.61
   //   RSI14: 43.61
   //   RSI is 43.61
+  //   RSI was 43.61
+  //   RSI reads 43.61
   //   RSI at 43.61
+  //
   // Invalid/non-value examples:
   //   RSI14
   //   RSI below 30
   //   RSI < 30
   //   RSI above 70
   //   RSI > 70
-  //   RSI value below 30
+  //   news confidence 65
+  //   confidence=65
   const patterns = [
     /\bRSI(?:14)?\s*(?:=|:)\s*([0-9]{1,3}(?:\.[0-9]+)?)/gi,
-    /\bRSI(?:14)?\s+(?:is|at|was|reads?)\s*([0-9]{1,3}(?:\.[0-9]+)?)(?!\s*(?:threshold|level))/gi,
-    /\bRSI\s*(?:\(\s*14\s*\))?\s*(?:=|:)\s*([0-9]{1,3}(?:\.[0-9]+)?)/gi,
+    /\bRSI(?:14)?\s+(?:is|was|reads?|at)\s+([0-9]{1,3}(?:\.[0-9]+)?)/gi,
+    /\bRSI\s*\(\s*14\s*\)\s*(?:=|:)\s*([0-9]{1,3}(?:\.[0-9]+)?)/gi,
   ];
 
   for (const p of patterns) {
     for (const m of s.matchAll(p)) {
       const full = String(m[0] || "");
-      const before = s.slice(Math.max(0, m.index - 35), m.index);
-      const after = s.slice(m.index, Math.min(s.length, m.index + full.length + 35));
-      const context = `${before} ${after}`;
 
-      // Do not treat threshold references as actual RSI measurements.
-      if (/\b(?:below|under|less than|<|above|over|greater than|>)\s*(?:30|70)\b/i.test(context)) continue;
-      if (/\b(?:oversold|overbought|threshold|classic|level)\b/i.test(context) && /\b(?:30|70)\b/.test(full)) continue;
+      // Reject threshold/comparator phrases even if they accidentally match future wording.
+      if (/\b(?:below|under|less than|<|above|over|greater than|>)\b/i.test(full)) continue;
+      if (/\b(?:threshold|level|classic|overbought|oversold)\b/i.test(full)) continue;
 
       const n = Number(m[1]);
       if (Number.isFinite(n) && n >= 0 && n <= 100) {
@@ -8087,7 +8090,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.40.4.2",
+        appVersion: "GoldScope v2.40.5.2",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -8467,7 +8470,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.4.2",
+        appVersion: "GoldScope v2.40.5.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -8601,6 +8604,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">RSI14 parser fix: on</Badge>
               <Badge value="supportive">Technical quality gate calibrated: on</Badge>
               <Badge value="supportive">RSI threshold parser fix: on</Badge>
+              <Badge value="supportive">RSI context isolation: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -8612,6 +8616,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">RSI numeric parser: strict</Badge>
               <Badge value="supportive">StochRSI overextension warning-only: on</Badge>
               <Badge value="supportive">RSI below/above threshold ignored: on</Badge>
+              <Badge value="supportive">Unrelated numbers ignored: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
@@ -8641,6 +8646,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">RSI14 parser fix: on</Badge>
               <Badge value="supportive">Technical quality gate calibrated: on</Badge>
               <Badge value="supportive">RSI threshold parser fix: on</Badge>
+              <Badge value="supportive">RSI context isolation: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -8652,6 +8658,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">RSI numeric parser: strict</Badge>
               <Badge value="supportive">StochRSI overextension warning-only: on</Badge>
               <Badge value="supportive">RSI below/above threshold ignored: on</Badge>
+              <Badge value="supportive">Unrelated numbers ignored: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
@@ -8738,7 +8745,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.4.2",
+        appVersion: "GoldScope v2.40.5.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -8941,7 +8948,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.4.2",
+        appVersion: "GoldScope v2.40.5.2",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -9235,7 +9242,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.40.4.2</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.40.5.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
