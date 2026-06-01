@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.34.1 - Safe Report Technical Awareness
+title GoldScope v2.35.4 - Validation Label + SourceHealth Accuracy
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.34.1 - Safe Report Technical Awareness
+echo   GoldScope v2.35.4 - Validation Label + SourceHealth Accuracy
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.

@@ -2270,6 +2270,127 @@ function technicalSourceQualityLabel(qualityScore, issues = []) {
   return "bad";
 }
 
+
+function resampleCandles(candles, bucketHours = 4) {
+  const c = (candles || [])
+    .filter((x) => x && Number.isFinite(x.open) && Number.isFinite(x.high) && Number.isFinite(x.low) && Number.isFinite(x.close) && x.time)
+    .sort((a, b) => new Date(a.time) - new Date(b.time));
+
+  const buckets = new Map();
+  for (const x of c) {
+    const d = new Date(x.time);
+    if (Number.isNaN(d.getTime())) continue;
+    const bucket = new Date(d);
+    bucket.setUTCMinutes(0, 0, 0);
+    const h = bucket.getUTCHours();
+    bucket.setUTCHours(Math.floor(h / bucketHours) * bucketHours);
+    const key = bucket.toISOString();
+    if (!buckets.has(key)) {
+      buckets.set(key, { time: key, open: x.open, high: x.high, low: x.low, close: x.close });
+    } else {
+      const b = buckets.get(key);
+      b.high = Math.max(b.high, x.high);
+      b.low = Math.min(b.low, x.low);
+      b.close = x.close;
+    }
+  }
+  return [...buckets.values()].sort((a, b) => new Date(a.time) - new Date(b.time));
+}
+
+function scoreTechnicalTimeframe(tf) {
+  if (!tf) return 0;
+  let s = 0;
+  const trend = String(tf.trend || "").toLowerCase();
+  const momentum = String(tf.momentum || "").toLowerCase();
+  const px = String(tf.priceVsEMA200 || "").toLowerCase();
+  if (trend.includes("bullish")) s += 2;
+  if (trend.includes("bearish")) s -= 2;
+  if (momentum.includes("positive")) s += 1;
+  if (momentum.includes("negative")) s -= 1;
+  if (px === "above") s += 1;
+  if (px === "below") s -= 1;
+  return s;
+}
+
+function labelFromTechnicalScore(score) {
+  if (score >= 4) return "bullish";
+  if (score <= -4) return "bearish";
+  if (score > 0) return "mild-bullish";
+  if (score < 0) return "mild-bearish";
+  return "neutral";
+}
+
+function buildMultiTimeframeSummary(timeframes) {
+  const entries = Object.entries(timeframes || {});
+  const items = entries.map(([tf, block]) => ({
+    timeframe: tf,
+    score: scoreTechnicalTimeframe(block),
+    trend: block?.trend || "unknown",
+    momentum: block?.momentum || "unknown",
+    priceVsEMA200: block?.priceVsEMA200 || "unknown",
+    rsi14: block?.rsi14 ?? null,
+  }));
+  const total = items.reduce((a, b) => a + b.score, 0);
+  const signs = new Set(items.map((x) => x.score > 0 ? "pos" : x.score < 0 ? "neg" : "flat"));
+  const conflicts = [];
+  if (signs.has("pos") && signs.has("neg")) conflicts.push("timeframe_direction_conflict");
+  return { score: total, bias: labelFromTechnicalScore(total), conflicts, timeframes: items };
+}
+
+function buildAlignmentContextForSnapshot(macroDirection, technicalContext) {
+  const macro = String(macroDirection || "mixed").toLowerCase();
+  const techBias = String(technicalContext?.multiTimeframe?.bias || technicalContext?.technicalBias || "unknown").toLowerCase();
+
+  if (!technicalContext || technicalContext.status === "unreliable" || technicalContext.usableForScenario === false) {
+    return {
+      macroDirection: macro,
+      technicalBias: "unusable",
+      alignment: "technical_unusable",
+      action: "ignore_technical_direction",
+      explanation: "Technical context is unusable and must not affect scenario direction.",
+      rule: "Technical context can confirm, weaken, or contradict macro context, but cannot override missing macro/event/replay evidence.",
+    };
+  }
+
+  const macroSupportive = macro.includes("supportive") || macro.includes("bullish") || macro.includes("positive");
+  const macroNegative = macro.includes("negative") || macro.includes("bearish");
+  const techBullish = techBias.includes("bullish");
+  const techBearish = techBias.includes("bearish");
+
+  let alignment = "mixed_or_insufficient";
+  let action = "prefer_wait_neutral";
+  let explanation = "Macro and technical context are incomplete, mixed, or insufficient.";
+
+  if (macroSupportive && techBullish) {
+    alignment = "aligned_bullish";
+    action = "allow_conditional_bullish_research_only";
+    explanation = "Macro read is supportive and technical context is bullish, but event outcomes and replay evidence are still required.";
+  } else if (macroNegative && techBearish) {
+    alignment = "aligned_bearish";
+    action = "allow_conditional_bearish_research_only";
+    explanation = "Macro read is negative and technical context is bearish, but event outcomes and replay evidence are still required.";
+  } else if (macroSupportive && techBearish) {
+    alignment = "macro_supportive_technical_bearish_conflict";
+    action = "force_wait_neutral";
+    explanation = "Macro read is supportive while technical context is bearish; technicals weaken the bullish case and force Wait-Neutral.";
+  } else if (macroNegative && techBullish) {
+    alignment = "macro_negative_technical_bullish_conflict";
+    action = "force_wait_neutral";
+    explanation = "Macro read is negative while technical context is bullish; technicals weaken the bearish case and force Wait-Neutral.";
+  }
+
+  return {
+    macroDirection: macro,
+    technicalBias: techBias,
+    multiTimeframeBias: technicalContext?.multiTimeframe?.bias || null,
+    alignment,
+    action,
+    explanation,
+    rule: "Technical context can confirm, weaken, or contradict macro context, but cannot override missing macro/event/replay evidence.",
+  };
+}
+
+
 function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timeframe = "1h", sourceName = "yahoo") {
   const cleaned = sanitizeCandles(candles, symbol);
   const c = cleaned.candles;
@@ -2654,14 +2775,15 @@ function describeTechnicalForSafeReport(tech) {
   const resistance = Array.isArray(tf.resistance) && tf.resistance.length ? tf.resistance.join(", ") : "not available";
   const qLabel = tech.dataQuality?.qualityLabel || tech.reliability || "unknown";
   const qScore = tech.dataQuality?.qualityScore ?? "unknown";
+  const mtfText = tech.multiTimeframe ? ` Multi-timeframe: bias=${tech.multiTimeframe.bias}, score=${tech.multiTimeframe.score}, conflicts=${(tech.multiTimeframe.conflicts || []).join(", ") || "none"}.` : "";
 
   return {
-    summary: `Technical context is usable as confirmation context only: ${bias} bias, confidence ${conf}, source ${sourceText}, quality ${qLabel}/${qScore}.`,
+    summary: `Technical context is usable as confirmation context only: ${bias} bias, confidence ${conf}, source ${sourceText}, quality ${qLabel}/${qScore}.${mtfText}`,
     evidenceRowState: `${bias} bias; trend=${trend}; momentum=${momentum}; priceVsEMA200=${priceVs}; source=${sourceText}`,
     implication: `${bias} technical confirmation context; must not override incomplete macro/event evidence`,
     reliability: qLabel,
     usable: true,
-    section: `Technical context is available and usable only as confirmation context, not as a macro override. Selected source: ${sourceText}. Data quality: ${qLabel} with score ${qScore}. Technical bias: ${bias} with confidence ${conf}. On ${tfKey || "selected timeframe"}, trend=${trend}, momentum=${momentum}, priceVsEMA200=${priceVs}, RSI14=${rsi}, ATR14=${atr}, EMA20=${ema20}, EMA50=${ema50}, EMA200=${ema200}, support=${support}, resistance=${resistance}. This can confirm, weaken, or contradict macro context, but it cannot override missing FRED drivers, blank event actual/forecast values, or absent replay evidence.`,
+    section: `Technical context is available and usable only as confirmation context, not as a macro override. Selected source: ${sourceText}. Data quality: ${qLabel} with score ${qScore}. Technical bias: ${bias} with confidence ${conf}. On ${tfKey || "selected timeframe"}, trend=${trend}, momentum=${momentum}, priceVsEMA200=${priceVs}, RSI14=${rsi}, ATR14=${atr}, EMA20=${ema20}, EMA50=${ema50}, EMA200=${ema200}, support=${support}, resistance=${resistance}. This can confirm, weaken, or contradict macro context, but it cannot override missing FRED drivers, blank event actual/forecast values, or absent replay evidence.${mtfText}`,
     alignment: bias,
   };
 }
@@ -2684,12 +2806,33 @@ function inferMacroTechnicalAlignment(snapshot, techDesc) {
   return "Macro/technical alignment is mixed or insufficient; Wait-Neutral remains appropriate.";
 }
 
+
+function technicalCaseWording(tech, caseType) {
+  const bias = String(tech?.technicalBias || "").toLowerCase();
+  const usable = tech?.usableForScenario === true && tech?.status === "available";
+  if (!usable) return "Technical context is not usable for this case.";
+
+  if (caseType === "bullish") {
+    if (bias.includes("bullish")) return "Technical bias currently supports the bullish conditional case, but it cannot confirm the case without macro/event validation.";
+    if (bias.includes("bearish")) return "Technical bias is bearish; therefore it currently weakens the bullish conditional case unless post-event price action reverses.";
+    return "Technical bias is neutral/mixed; therefore it does not confirm the bullish conditional case.";
+  }
+
+  if (caseType === "bearish") {
+    if (bias.includes("bearish")) return "Technical bias is bearish; therefore it currently supports the bearish conditional case, but it cannot confirm the case without macro/event validation.";
+    if (bias.includes("bullish")) return "Technical bias is bullish; therefore it currently weakens the bearish conditional case unless post-event price action reverses.";
+    return "Technical bias is neutral/mixed; therefore it does not confirm the bearish conditional case.";
+  }
+
+  return "Technical context is confirmation/contradiction context only.";
+}
+
 function buildValidationSafeGoldReport(snapshot, validation) {
   const nextMajor = getNextMajorEvent(snapshot) || {};
   const flags = snapshot?.contextQualityFlags || {};
   const tech = snapshot?.technicalContext || {};
   const techDesc = describeTechnicalForSafeReport(tech);
-  const alignmentText = inferMacroTechnicalAlignment(snapshot, techDesc);
+  const alignmentText = snapshot?.alignmentContext?.explanation || inferMacroTechnicalAlignment(snapshot, techDesc);
   const fredRows = snapshot?.dataReadiness?.fredRows ?? 0;
   const newsItems = snapshot?.dataReadiness?.newsItems ?? 0;
   const replayRecords = snapshot?.dataReadiness?.replayRecords ?? 0;
@@ -2707,7 +2850,7 @@ function buildValidationSafeGoldReport(snapshot, validation) {
     .join("\n");
 
   return `VALIDATION-GATED SAFE REPORT
-The original AI report was rejected because it failed high-severity validation. The following report is generated deterministically from the GoldScope snapshot.
+The original AI report was rejected because it failed high-severity validation. The following report is generated deterministically from the GoldScope snapshot. The validation list at the end refers to the rejected original AI output, not to this safe report.
 
 1. Dominant research scenario
 Wait-Neutral.
@@ -2731,14 +2874,14 @@ Confidence reducers: incomplete FRED coverage (${fredRows}/11 loaded), newsStren
 4. Bullish case for gold
 Confirmed evidence: none.
 Conditional evidence: if future labor data weakens expectations and yields/USD fall, gold may receive support; if inflation is hot while real yields fall, gold may receive support. These are conditional gates only because actual and forecast values are missing.
-Technical confirmation context: ${techDesc.usable ? `technical bias is ${safeValue(tech.technicalBias)}. If this bias supports the bullish gate after the event, it may strengthen confirmation; if it conflicts, it should keep the system Wait-Neutral.` : "not usable."}
+Technical confirmation context: ${techDesc.usable ? technicalCaseWording(tech, "bullish") : "not usable."}
 Missing evidence: confirmed labor outcome, confirmed CPI/PCE outcome, complete real-yield and USD drivers, replay evidence, and event-time technical reaction.
 Invalidation conditions: if labor data strengthens expectations and yields/USD rise, or if hot inflation lifts real yields, the bullish case weakens.
 
 5. Bearish case for gold
 Confirmed evidence: none.
 Conditional evidence: if future labor data strengthens expectations and yields/USD rise, gold may face pressure; if inflation is hot and real yields rise, gold may face pressure. These are conditional gates only.
-Technical confirmation context: ${techDesc.usable ? `technical bias is ${safeValue(tech.technicalBias)}. If this bias supports the bearish gate after the event, it may strengthen confirmation; if it conflicts, it should keep the system Wait-Neutral.` : "not usable."}
+Technical confirmation context: ${techDesc.usable ? technicalCaseWording(tech, "bearish") : "not usable."}
 Missing evidence: confirmed labor outcome, confirmed inflation outcome, complete FRED macro drivers, replay evidence, and event-time technical reaction.
 Invalidation conditions: if labor data weakens expectations and yields/USD fall, or if real yields fall despite hot inflation, the bearish case weakens.
 
@@ -2767,8 +2910,64 @@ Avoid-window: ${avoidWindow}.
 10. Final research note
 This report remains Wait-Neutral because the evidence base is incomplete and the rejected AI output contained validation failures. ${techDesc.usable ? "Technical context is available as confirmation context, but directional bias remains blocked until macro drivers, event outcomes, and replay evidence improve." : "Directional bias should remain blocked until macro drivers, event outcomes, replay evidence, and usable technical context improve."} <END_GOLDSCOPE_REPORT>
 
-AI OUTPUT VALIDATION
+REJECTED AI OUTPUT VALIDATION
 ${validationLines}`;
+}
+
+
+function collectTechnicalRsiValues(snapshot) {
+  const tfs = snapshot?.technicalContext?.timeframes || {};
+  return Object.values(tfs)
+    .map((tf) => Number(tf?.rsi14))
+    .filter((x) => Number.isFinite(x));
+}
+
+function getSectionText(reportText, sectionNumberOrTitle) {
+  const s = String(reportText || "");
+  const n = String(sectionNumberOrTitle);
+  const re = new RegExp(`(?:^|\\n)\\s*${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.?[\\s\\S]*?(?=\\n\\s*\\d+\\.|$)`, "i");
+  const m = s.match(re);
+  return m ? m[0] : "";
+}
+
+function technicalBiasDirection(snapshot) {
+  return String(snapshot?.technicalContext?.multiTimeframe?.bias || snapshot?.technicalContext?.technicalBias || "").toLowerCase();
+}
+
+function reportMentionsTechnicalConfirmedEvidence(text) {
+  const s = String(text || "");
+  const bearish = getSectionText(s, "5");
+  const bullish = getSectionText(s, "4");
+  const joined = `${bullish}\n${bearish}`;
+  return /Confirmed evidence\s*:\s*(?:[^\n]*technical|[\s\S]{0,180}technical context|[\s\S]{0,180}technical bias|[\s\S]{0,180}bearish bias|[\s\S]{0,180}bullish bias)/i.test(joined);
+}
+
+function hasThinkingArtifact(text) {
+  return /<\/think>|<think>|\/think\b|Okay,\s*the user wants|Let me\s|I need to\s|chain[- ]of[- ]thought|hidden reasoning|private thinking|reasoning artifact/i.test(String(text || ""));
+}
+
+function sectionMentionsTechnicalWeakensBullish(text) {
+  const bullish = getSectionText(text, "4");
+  return /(technical|multi[- ]timeframe)[\s\S]{0,160}(weakens|contradicts|does not support|undermines)[\s\S]{0,120}(bullish|upside)/i.test(bullish)
+    || /(bearish technical|technical bias is bearish)[\s\S]{0,160}(weakens|contradicts|does not support|undermines)/i.test(bullish);
+}
+
+function sectionMentionsTechnicalSupportsBearish(text) {
+  const bearish = getSectionText(text, "5");
+  return /(technical|multi[- ]timeframe)[\s\S]{0,160}(supports|strengthens|confirms as context|adds confirmation context)[\s\S]{0,120}(bearish|downside)/i.test(bearish)
+    || /(bearish technical|technical bias is bearish)[\s\S]{0,160}(supports|strengthens|adds)/i.test(bearish);
+}
+
+function sectionMentionsTechnicalWeakensBearish(text) {
+  const bearish = getSectionText(text, "5");
+  return /(technical|multi[- ]timeframe)[\s\S]{0,160}(weakens|contradicts|does not support|undermines)[\s\S]{0,120}(bearish|downside)/i.test(bearish)
+    || /(bullish technical|technical bias is bullish)[\s\S]{0,160}(weakens|contradicts|does not support|undermines)/i.test(bearish);
+}
+
+function sectionMentionsTechnicalSupportsBullish(text) {
+  const bullish = getSectionText(text, "4");
+  return /(technical|multi[- ]timeframe)[\s\S]{0,160}(supports|strengthens|confirms as context|adds confirmation context)[\s\S]{0,120}(bullish|upside)/i.test(bullish)
+    || /(bullish technical|technical bias is bullish)[\s\S]{0,160}(supports|strengthens|adds)/i.test(bullish);
 }
 
 function validateAiGoldReport(output, snapshot) {
@@ -3030,6 +3229,85 @@ function validateAiGoldReport(output, snapshot) {
       code: "invented_conceptual_example",
       message: "AI used conceptual examples not present in snapshot while event actual/forecast data are blank.",
     });
+  }
+
+
+
+  // 13) Think-tag / hidden-reasoning artifact rejection
+  if (hasThinkingArtifact(text)) {
+    issues.push({
+      severity: "high",
+      code: "thinking_artifact_leak",
+      message: "AI output contains think tags or hidden-reasoning artifacts and must be rejected.",
+    });
+  }
+
+  // 14) Technical RSI fact validator
+  const rsiValues = collectTechnicalRsiValues(snapshot);
+  const hasRsiAbove70 = rsiValues.some((x) => x > 70);
+  const hasRsiBelow30 = rsiValues.some((x) => x < 30);
+
+  if (/\bRSI(?:14)?\b[\s\S]{0,80}\boverbought\b|\boverbought\b[\s\S]{0,80}\bRSI(?:14)?\b/i.test(text) && !hasRsiAbove70) {
+    issues.push({
+      severity: "high",
+      code: "rsi_overbought_fact_error",
+      message: `AI described RSI as overbought, but no technical RSI value is above 70. RSI values: ${rsiValues.join(", ") || "none"}.`,
+    });
+  }
+
+  if (/\bRSI(?:14)?\b[\s\S]{0,80}\boversold\b|\boversold\b[\s\S]{0,80}\bRSI(?:14)?\b/i.test(text) && !hasRsiBelow30) {
+    issues.push({
+      severity: "high",
+      code: "rsi_oversold_fact_error",
+      message: `AI described RSI as oversold, but no technical RSI value is below 30. RSI values: ${rsiValues.join(", ") || "none"}.`,
+    });
+  }
+
+  // 15) Technical context must not be treated as confirmed evidence
+  if (reportMentionsTechnicalConfirmedEvidence(text)) {
+    issues.push({
+      severity: "high",
+      code: "technical_confirmed_evidence_error",
+      message: "AI placed technical context under Confirmed evidence. Technicals are confirmation/contradiction context only, not confirmed macro/event evidence.",
+    });
+  }
+
+  // 16) Case-specific technical wording validator
+  const techDir = technicalBiasDirection(snapshot);
+  const techUsable = snapshot?.technicalContext?.usableForScenario === true && snapshot?.technicalContext?.status === "available";
+
+  if (techUsable && techDir.includes("bearish")) {
+    if (!sectionMentionsTechnicalWeakensBullish(text)) {
+      issues.push({
+        severity: "medium",
+        code: "missing_bearish_technical_weakens_bullish_case",
+        message: "Technical bias is bearish, but the bullish case does not clearly state that technicals currently weaken the bullish conditional case.",
+      });
+    }
+    if (!sectionMentionsTechnicalSupportsBearish(text)) {
+      issues.push({
+        severity: "medium",
+        code: "missing_bearish_technical_supports_bearish_case",
+        message: "Technical bias is bearish, but the bearish case does not clearly state that technicals support the bearish conditional case as confirmation context.",
+      });
+    }
+  }
+
+  if (techUsable && techDir.includes("bullish")) {
+    if (!sectionMentionsTechnicalSupportsBullish(text)) {
+      issues.push({
+        severity: "medium",
+        code: "missing_bullish_technical_supports_bullish_case",
+        message: "Technical bias is bullish, but the bullish case does not clearly state that technicals support the bullish conditional case as confirmation context.",
+      });
+    }
+    if (!sectionMentionsTechnicalWeakensBearish(text)) {
+      issues.push({
+        severity: "medium",
+        code: "missing_bullish_technical_weakens_bearish_case",
+        message: "Technical bias is bullish, but the bearish case does not clearly state that technicals currently weaken the bearish conditional case.",
+      });
+    }
   }
 
 
@@ -6329,6 +6607,45 @@ ${err.message}`);
           selected.interval,
           selected.sourceName
         );
+
+        try {
+          if (selected.interval === "1h" && ctx.status === "available") {
+            const candles4h = resampleCandles(selected.candles, 4);
+            const ctx4h = computeTechnicalContextFromCandles(candles4h, selected.symbol, "4h", selected.sourceName);
+            if (ctx4h.status === "available" && ctx4h.timeframes?.["4h"]) {
+              ctx.timeframes["4h"] = ctx4h.timeframes["4h"];
+            }
+          }
+
+          if (ctx.status === "available") {
+            let dailyCandles = [];
+            try {
+              if (selected.sourceName === "Yahoo") {
+                dailyCandles = await fetchYahooChart(selected.symbol, "1y", "1d");
+              } else if (selected.sourceName === "Stooq") {
+                dailyCandles = await fetchStooqDaily(selected.symbol);
+              }
+            } catch (dailyErr) {
+              ctx.dailySourceError = dailyErr.message;
+            }
+
+            if (dailyCandles.length) {
+              const ctx1d = computeTechnicalContextFromCandles(dailyCandles, selected.symbol, "1d", selected.sourceName);
+              if (ctx1d.status === "available" && ctx1d.timeframes?.["1d"]) {
+                ctx.timeframes["1d"] = ctx1d.timeframes["1d"];
+              }
+            }
+
+            ctx.multiTimeframe = buildMultiTimeframeSummary(ctx.timeframes);
+            if (ctx.multiTimeframe?.bias) {
+              ctx.technicalBias = ctx.multiTimeframe.bias;
+              ctx.technicalConfidence = Math.min(75, Math.max(ctx.technicalConfidence || 0, 35 + Math.abs(ctx.multiTimeframe.score || 0) * 8));
+            }
+          }
+        } catch (mtErr) {
+          ctx.multiTimeframeError = mtErr.message;
+        }
+
         ctx.sourceSelection = {
           selected: {
             sourceName: selected.sourceName,
@@ -6441,6 +6758,88 @@ ${err.message}`);
       };
     }
 
+
+    function normalizeOneSourceHealth(item) {
+      const status = String(item?.status || "unknown").toLowerCase();
+      const message = String(item?.message || "");
+      const lower = message.toLowerCase();
+
+      if (lower.includes("429") || lower.includes("rate-limit") || lower.includes("rate limit") || lower.includes("too many requests")) {
+        return {
+          ...item,
+          status: "rate-limited",
+          originalStatus: item?.status || "unknown",
+          conservative: true,
+          message: item?.message || "Rate limited.",
+        };
+      }
+
+      if (lower.includes("missing-key") || lower.includes("not connected") || lower.includes("missing key")) {
+        return {
+          ...item,
+          status: item?.status === "live" ? "missing-key" : item?.status,
+          conservative: true,
+        };
+      }
+
+      if (status === "live" && /error|failed|fallback/i.test(message)) {
+        return {
+          ...item,
+          status: "degraded",
+          originalStatus: item?.status || "live",
+          conservative: true,
+        };
+      }
+
+      return item;
+    }
+
+    function normalizeSourceHealth(health) {
+      const h = health || {};
+      return Object.fromEntries(
+        Object.entries(h).map(([key, value]) => [key, normalizeOneSourceHealth(value)])
+      );
+    }
+
+    function conservativeStatusFromHealth(item) {
+      const s = String(item?.status || "unknown").toLowerCase();
+      if (s === "rate-limited") return "rate-limited";
+      if (s === "degraded") return "degraded";
+      if (s === "partial") return "partial";
+      if (s === "missing-key") return "missing-key";
+      if (s === "live") return "live";
+      return s || "unknown";
+    }
+
+    function applySourceHealthConservatism(flags, normalizedHealth) {
+      const next = { ...(flags || {}) };
+      next.sourceReliabilitySummary = {
+        ...(next.sourceReliabilitySummary || {}),
+        fred: conservativeStatusFromHealth(normalizedHealth?.fred),
+        gdelt: conservativeStatusFromHealth(normalizedHealth?.gdelt),
+        tradingEconomics: conservativeStatusFromHealth(normalizedHealth?.tradingEconomics),
+        reddit: conservativeStatusFromHealth(normalizedHealth?.reddit),
+        youtube: conservativeStatusFromHealth(normalizedHealth?.youtube),
+      };
+
+      if (next.sourceReliabilitySummary.fred === "rate-limited") {
+        next.macroReliability = next.macroReliability === "complete" ? "partial" : (next.macroReliability || "partial");
+        next.fredRateLimited = true;
+      }
+
+      if (next.sourceReliabilitySummary.gdelt === "rate-limited") {
+        next.newsReliability = "rate-limited";
+        next.newsStrength = next.newsStrength === "strong" ? "moderate" : (next.newsStrength || "weak");
+        next.gdeltRateLimited = true;
+      }
+
+      if (Object.values(next.sourceReliabilitySummary).some((s) => s === "rate-limited" || s === "degraded")) {
+        next.sourceHealthConservative = true;
+      }
+
+      return next;
+    }
+
     function buildGoldScopeContextSnapshot() {
       const scenario = buildScenarioModel();
       const fredCompact = compactFredRows();
@@ -6450,7 +6849,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.34.1",
+        appVersion: "GoldScope v2.35.4",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -6469,8 +6868,9 @@ ${err.message}`);
         calendar: compactCalendar(),
         replayEvidence: replayCompact,
         technicalContext: maskTechnicalContextForPrompt(technicalContext),
-        sourceHealth: health,
-        contextQualityFlags: qualityFlags,
+        alignmentContext: buildAlignmentContextForSnapshot(scenario.macroDirection, maskTechnicalContextForPrompt(technicalContext)),
+        sourceHealth: normalizeSourceHealth(health),
+        contextQualityFlags: applySourceHealthConservatism(qualityFlags, normalizeSourceHealth(health)),
         dataReadiness: {
           fredRows: (fredRows || []).length,
           newsItems: (news || []).length,
@@ -6524,7 +6924,7 @@ STRICT SOURCE RULES:
 12. Always produce a non-empty answer.
 12a. If you cannot satisfy these rules, output Wait-Neutral and explicitly say the evidence is insufficient.
 13. End the report with: <END_GOLDSCOPE_REPORT>
-14. Do not include phrases such as "Okay, the user wants", "Let me", "I need to", "/think", or internal planning text.
+14. Do not include phrases such as "Okay, the user wants", "Let me", "I need to", "/think", "<think>", "</think>", or internal planning text.
 15. Instrument guard: do not treat mining-company stocks, ETF/company shares, OTCMKTS items, or retail gold-rate articles as spot gold/XAUUSD movement.
 16. Do not mention specific price levels, support, resistance, breakout, breakdown, or "recover above/below" unless spotPrice or technicalContext exists in the snapshot.
 17. If technicalContext exists, use it only as market-confirmation context. It must not override missing macro/event evidence.
@@ -6533,6 +6933,8 @@ STRICT SOURCE RULES:
 20. Do not describe EMA20 below EMA200 as bullish. Price above EMA200 alone is only mild support and can be contradicted by EMA alignment or overbought RSI.
 21. If technicalContext.usableForScenario is false, do not mention mild-bullish, mild-bearish, RSI, EMA, ATR, support, resistance, or priceVsEMA200 as scenario evidence unless those fields are explicitly present in the masked technicalContext.
 22. If technicalContext.sourceSelection exists, you may summarize source quality and selected symbol, but do not treat failed/weak sources as evidence.
+23. If technicalContext.multiTimeframe exists, summarize cross-timeframe agreement or conflict.
+24. If alignmentContext exists, use it as the final macro/technical alignment rule; it can confirm, weaken, or contradict, but cannot override missing macro/event/replay evidence.
 
 MACRO LOGIC GUARD:
 Apply these rules unless the GoldScope state explicitly contradicts them:
@@ -6569,6 +6971,10 @@ Before finalizing, check your own answer for these mistakes:
 - When technicalContext.usableForScenario is false, do not infer trend, support/resistance, RSI, EMA alignment, momentum, or technical bias from masked fields.
 - Weak NFP/labor with falling yields/USD is generally gold-supportive; strong NFP/labor with rising yields/USD is generally gold-negative.
 - Do not use invented examples after "e.g." when forecast/actual values are blank.
+- Do not write <think>, </think>, /think, hidden reasoning, or planning artifacts.
+- Do not call RSI overbought unless at least one provided RSI value is above 70.
+- Do not call RSI oversold unless at least one provided RSI value is below 30.
+- Do not place technical context under Confirmed evidence. Technicals are confirmation/contradiction context only.
 - The Next catalyst plan must use deterministicScenarioLab.nextMajor/calendar.nextMajor exactly. Do not replace it with a later FOMC/CPI/PCE event.
 
 TASK:
@@ -6768,7 +7174,7 @@ ${JSON.stringify(data, null, 2)}`);
               setAiStatus("AI rejected: safe report generated");
             } else {
               const decorated = validation.issues.length
-                ? `${out}\n\n---\nAI OUTPUT VALIDATION\n${validationText}`
+                ? `${out}\n\n---\nREJECTED AI OUTPUT VALIDATION\n${validationText}`
                 : out;
               setAiOutput(decorated);
               setAiStatus(validation.ok
@@ -6819,7 +7225,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.34.1",
+        appVersion: "GoldScope v2.35.4",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -6853,7 +7259,7 @@ ${err.stack || err.message || String(err)}`);
     return (
       <div style={{ display: "grid", gap: 16 }}>
         <Card>
-          <Title icon="🤖" title="AI Engine - Safe Report Technical Awareness" sub="Prompt is generated automatically. No manual prompt editing is needed." />
+          <Title icon="🤖" title="AI Engine - Validation Label + SourceHealth Accuracy" sub="Prompt is generated automatically. No manual prompt editing is needed." />
 
           <Card style={{ background: "#170a12", borderColor: "#7f1d1d", marginBottom: 14 }}>
             <b style={{ color: C.red }}>Important:</b>{" "}
@@ -6935,6 +7341,13 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Technical source repair: on</Badge>
               <Badge value="supportive">XAUUSD first: on</Badge>
               <Badge value="supportive">Safe technical awareness: on</Badge>
+              <Badge value="supportive">Case-specific technical wording: on</Badge>
+              <Badge value="supportive">Alignment engine: on</Badge>
+              <Badge value="supportive">Multi-timeframe: on</Badge>
+              <Badge value="supportive">Think-tag rejection: on</Badge>
+              <Badge value="supportive">Technical fact validator: on</Badge>
+              <Badge value="supportive">Source health normalization: on</Badge>
+              <Badge value="supportive">Rejected-output label: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
               <Badge value="supportive">Event validator: on</Badge>
@@ -6943,7 +7356,14 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Safe report: on</Badge>
               <Badge value="supportive">Technical source repair: on</Badge>
               <Badge value="supportive">XAUUSD first: on</Badge>
-              <Badge value="supportive">Safe technical awareness: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
+              <Badge value="supportive">Safe technical awareness: on</Badge>
+              <Badge value="supportive">Case-specific technical wording: on</Badge>
+              <Badge value="supportive">Alignment engine: on</Badge>
+              <Badge value="supportive">Multi-timeframe: on</Badge>
+              <Badge value="supportive">Think-tag rejection: on</Badge>
+              <Badge value="supportive">Technical fact validator: on</Badge>
+              <Badge value="supportive">Source health normalization: on</Badge>
+              <Badge value="supportive">Rejected-output label: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
 
