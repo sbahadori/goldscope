@@ -2119,20 +2119,186 @@ function estimateSupportResistance(candles, lookback = 60) {
   return { support, resistance };
 }
 
-function computeTechnicalContextFromCandles(candles, symbol = "GC=F", timeframe = "1h") {
-  const c = Array.isArray(candles) ? candles.filter((x) =>
-    Number.isFinite(x.close) && Number.isFinite(x.high) && Number.isFinite(x.low)
-  ) : [];
 
-  if (c.length < 30) {
+function median(values) {
+  const clean = (values || []).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!clean.length) return null;
+  const mid = Math.floor(clean.length / 2);
+  return clean.length % 2 ? clean[mid] : (clean[mid - 1] + clean[mid]) / 2;
+}
+
+function percentile(values, p) {
+  const clean = (values || []).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!clean.length) return null;
+  const idx = Math.min(clean.length - 1, Math.max(0, Math.round((p / 100) * (clean.length - 1))));
+  return clean[idx];
+}
+
+function technicalSymbolMeta(symbol) {
+  const s = String(symbol || "").toUpperCase();
+  if (s.includes("XAUUSD")) {
+    return {
+      instrument: "XAUUSD",
+      proxy: "Spot gold proxy from Yahoo symbol XAUUSD=X.",
+      expectedPriceMin: 500,
+      expectedPriceMax: 8000,
+      maxSingleCandleReturn: 0.12,
+      preferred: true,
+    };
+  }
+  if (s.includes("GC=F") || s.includes("GC")) {
+    return {
+      instrument: "GC futures",
+      proxy: "Gold futures proxy for XAUUSD; not direct spot XAUUSD.",
+      expectedPriceMin: 500,
+      expectedPriceMax: 8000,
+      maxSingleCandleReturn: 0.15,
+      preferred: false,
+    };
+  }
+  return {
+    instrument: "gold proxy",
+    proxy: "Gold price proxy.",
+    expectedPriceMin: 500,
+    expectedPriceMax: 8000,
+    maxSingleCandleReturn: 0.15,
+    preferred: false,
+  };
+}
+
+function sanitizeCandles(candles, symbol = "XAUUSD=X") {
+  const meta = technicalSymbolMeta(symbol);
+  const raw = Array.isArray(candles) ? candles : [];
+  const normalized = raw
+    .map((x) => ({
+      time: x.time || x.date || "",
+      open: Number(x.open),
+      high: Number(x.high),
+      low: Number(x.low),
+      close: Number(x.close),
+    }))
+    .filter((x) =>
+      Number.isFinite(x.open) &&
+      Number.isFinite(x.high) &&
+      Number.isFinite(x.low) &&
+      Number.isFinite(x.close) &&
+      x.open > 0 &&
+      x.high > 0 &&
+      x.low > 0 &&
+      x.close > 0 &&
+      x.high >= x.low &&
+      x.high >= Math.min(x.open, x.close) &&
+      x.low <= Math.max(x.open, x.close)
+    )
+    .sort((a, b) => String(a.time).localeCompare(String(b.time)));
+
+  const closeMedian = median(normalized.map((x) => x.close));
+  const p10 = percentile(normalized.map((x) => x.close), 10);
+  const p90 = percentile(normalized.map((x) => x.close), 90);
+  const issues = [];
+
+  if (raw.length && normalized.length / raw.length < 0.85) {
+    issues.push("many_invalid_ohlc_removed");
+  }
+
+  if (!Number.isFinite(closeMedian)) {
+    return { candles: [], issues: ["no_valid_candles"], qualityScore: 0, meta };
+  }
+
+  let filtered = normalized.filter((x) => {
+    if (x.close < meta.expectedPriceMin || x.close > meta.expectedPriceMax) return false;
+    if (x.low < meta.expectedPriceMin * 0.5 || x.high > meta.expectedPriceMax * 1.25) return false;
+    if (closeMedian && (x.close / closeMedian > 1.6 || x.close / closeMedian < 0.625)) return false;
+    return true;
+  });
+
+  if (filtered.length < normalized.length * 0.9) {
+    issues.push("outlier_price_candles_removed");
+  }
+
+  // Remove discontinuity outliers against previous accepted close.
+  const continuity = [];
+  for (const x of filtered) {
+    const prev = continuity[continuity.length - 1];
+    if (!prev) {
+      continuity.push(x);
+      continue;
+    }
+    const ret = Math.abs(x.close - prev.close) / Math.max(Math.abs(prev.close), 1);
+    if (ret <= meta.maxSingleCandleReturn) {
+      continuity.push(x);
+    } else {
+      issues.push("large_discontinuity_candle_removed");
+    }
+  }
+
+  filtered = continuity;
+
+  const last = filtered[filtered.length - 1];
+  if (last && closeMedian) {
+    const ratio = last.close / closeMedian;
+    if (ratio > 1.45 || ratio < 0.69) {
+      issues.push("last_price_far_from_series_median");
+    }
+  }
+
+  if (p10 && p90 && p90 / Math.max(p10, 1) > 2.2) {
+    issues.push("wide_price_distribution_possible_bad_history");
+  }
+
+  const qualityScore = Math.max(0, Math.min(100,
+    100
+    - issues.length * 18
+    - (filtered.length < 80 ? 25 : 0)
+    - (filtered.length < 30 ? 35 : 0)
+  ));
+
+  return {
+    candles: filtered,
+    issues: [...new Set(issues)],
+    qualityScore,
+    rawCount: raw.length,
+    cleanCount: filtered.length,
+    meta,
+  };
+}
+
+function technicalSourceQualityLabel(qualityScore, issues = []) {
+  if (qualityScore >= 75 && !issues.length) return "good";
+  if (qualityScore >= 60) return "usable";
+  if (qualityScore >= 40) return "weak";
+  return "bad";
+}
+
+function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timeframe = "1h", sourceName = "yahoo") {
+  const cleaned = sanitizeCandles(candles, symbol);
+  const c = cleaned.candles;
+  const meta = cleaned.meta;
+  const sourceQuality = technicalSourceQualityLabel(cleaned.qualityScore, cleaned.issues);
+
+  if (c.length < 30 || sourceQuality === "bad") {
     return {
       symbol,
-      proxy: symbol === "GC=F" ? "Gold futures proxy for XAUUSD" : "Price proxy",
-      status: "insufficient-data",
-      reason: `Need at least 30 candles; got ${c.length}.`,
+      sourceName,
+      proxy: meta.proxy,
+      status: "unreliable",
+      reliability: "unreliable",
+      usableForScenario: false,
+      reason: c.length < 30 ? `Need at least 30 clean candles; got ${c.length}.` : "Technical source quality failed sanity checks.",
+      dataQuality: {
+        qualityScore: cleaned.qualityScore,
+        qualityLabel: sourceQuality,
+        rawCount: cleaned.rawCount,
+        cleanCount: cleaned.cleanCount,
+        issues: cleaned.issues,
+      },
       timeframes: {},
-      technicalBias: "unknown",
+      technicalBias: "masked-unreliable",
       technicalConfidence: 0,
+      sanityIssues: cleaned.issues.length ? cleaned.issues : ["technical_source_quality_bad"],
+      guardrails: [
+        "Technical data source failed quality checks and must not be used as directional evidence.",
+      ],
     };
   }
 
@@ -2171,6 +2337,7 @@ function computeTechnicalContextFromCandles(candles, symbol = "GC=F", timeframe 
   const minLow = nonZeroLows.length ? Math.min(...nonZeroLows) : null;
 
   if (support.some((x) => !Number.isFinite(x) || x <= 0)) sanityIssues.push("invalid_support_zero_or_negative");
+  if (!support.length && c.length >= 60) sanityIssues.push("support_unavailable_after_cleaning");
 
   if (Number.isFinite(price) && Number.isFinite(ema20)) {
     const d = Math.abs(price - ema20) / Math.max(Math.abs(price), 1);
@@ -2202,10 +2369,20 @@ function computeTechnicalContextFromCandles(candles, symbol = "GC=F", timeframe 
 
   return {
     symbol,
-    proxy: symbol === "GC=F" ? "Gold futures proxy for XAUUSD; not spot XAUUSD." : "Price proxy",
+    sourceName,
+    proxy: meta.proxy,
+    instrument: meta.instrument,
     status: technicalReliability === "unreliable" ? "unreliable" : "available",
     reliability: technicalReliability,
-    sanityIssues,
+    usableForScenario: technicalReliability !== "unreliable",
+    dataQuality: {
+      qualityScore: cleaned.qualityScore,
+      qualityLabel: sourceQuality,
+      rawCount: cleaned.rawCount,
+      cleanCount: cleaned.cleanCount,
+      issues: cleaned.issues,
+    },
+    sanityIssues: [...new Set([...sanityIssues, ...cleaned.issues])],
     lastUpdated: c[c.length - 1]?.time || new Date().toISOString(),
     candleCount: c.length,
     timeframes: {
@@ -2235,7 +2412,90 @@ function computeTechnicalContextFromCandles(candles, symbol = "GC=F", timeframe 
   };
 }
 
-async function fetchYahooChart(symbol = "GC=F", range = "60d", interval = "1h") {
+
+async function fetchStooqDaily(symbol = "xauusd") {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(end.getDate() - 260);
+  const fmt = (d) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+  const url = `/api/stooq/q/d/l/?s=${encodeURIComponent(symbol)}&d1=${fmt(start)}&d2=${fmt(end)}&i=d`;
+  const res = await fetch(url, { cache: "no-store" });
+  const csv = await res.text();
+  if (!res.ok) throw new Error(`Stooq HTTP ${res.status}: ${csv.slice(0, 300)}`);
+  if (!csv || /No data/i.test(csv)) throw new Error(`Stooq returned no data for ${symbol}`);
+
+  const lines = csv.trim().split(/\r?\n/);
+  const header = lines.shift();
+  if (!header || !/date/i.test(header)) throw new Error("Stooq CSV header missing");
+  return lines.map((line) => {
+    const [date, open, high, low, close] = line.split(",");
+    return {
+      time: `${date}T00:00:00.000Z`,
+      open: Number(open),
+      high: Number(high),
+      low: Number(low),
+      close: Number(close),
+    };
+  }).filter((x) =>
+    Number.isFinite(x.open) && Number.isFinite(x.high) && Number.isFinite(x.low) && Number.isFinite(x.close)
+  );
+}
+
+async function loadBestTechnicalCandles() {
+  const candidates = [
+    { sourceName: "Yahoo", symbol: "XAUUSD=X", range: "90d", interval: "1h", fetcher: () => fetchYahooChart("XAUUSD=X", "90d", "1h") },
+    { sourceName: "Yahoo", symbol: "XAUUSD=X", range: "1y", interval: "1d", fetcher: () => fetchYahooChart("XAUUSD=X", "1y", "1d") },
+    { sourceName: "Yahoo", symbol: "GC=F", range: "90d", interval: "1h", fetcher: () => fetchYahooChart("GC=F", "90d", "1h") },
+    { sourceName: "Yahoo", symbol: "GC=F", range: "1y", interval: "1d", fetcher: () => fetchYahooChart("GC=F", "1y", "1d") },
+    { sourceName: "Stooq", symbol: "xauusd", range: "260d", interval: "1d", fetcher: () => fetchStooqDaily("xauusd") },
+  ];
+
+  const attempts = [];
+  for (const candidate of candidates) {
+    try {
+      const candles = await candidate.fetcher();
+      const cleaned = sanitizeCandles(candles, candidate.symbol);
+      const qualityLabel = technicalSourceQualityLabel(cleaned.qualityScore, cleaned.issues);
+      attempts.push({
+        ...candidate,
+        candles,
+        cleanCount: cleaned.cleanCount,
+        rawCount: cleaned.rawCount,
+        qualityScore: cleaned.qualityScore,
+        qualityLabel,
+        issues: cleaned.issues,
+        ok: qualityLabel === "good" || qualityLabel === "usable",
+      });
+      if (qualityLabel === "good" || qualityLabel === "usable") {
+        return { ...candidate, candles, attempts };
+      }
+    } catch (err) {
+      attempts.push({
+        ...candidate,
+        candles: [],
+        cleanCount: 0,
+        rawCount: 0,
+        qualityScore: 0,
+        qualityLabel: "error",
+        issues: [err.message],
+        ok: false,
+      });
+    }
+  }
+
+  const best = attempts
+    .filter((a) => a.candles?.length)
+    .sort((a, b) => b.qualityScore - a.qualityScore)[0];
+
+  if (best) {
+    return { ...best, attempts };
+  }
+
+  throw new Error(`All technical data sources failed: ${attempts.map((a) => `${a.sourceName}:${a.symbol}:${a.issues?.[0] || a.qualityLabel}`).join(" | ")}`);
+}
+
+
+async function fetchYahooChart(symbol = "XAUUSD=X", range = "90d", interval = "1h") {
   const url = `/api/yahoo/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`;
   const res = await fetch(url, { cache: "no-store" });
   const text = await res.text();
@@ -5984,26 +6244,59 @@ ${err.message}`);
 
 
     async function loadTechnicalContext() {
-      setTechnicalStatus("loading GC=F technical data...");
+      setTechnicalStatus("loading best technical data source...");
       try {
-        const candles = await fetchYahooChart("GC=F", "60d", "1h");
-        const ctx = computeTechnicalContextFromCandles(candles, "GC=F", "1h");
+        const selected = await loadBestTechnicalCandles();
+        const ctx = computeTechnicalContextFromCandles(
+          selected.candles,
+          selected.symbol,
+          selected.interval,
+          selected.sourceName
+        );
+        ctx.sourceSelection = {
+          selected: {
+            sourceName: selected.sourceName,
+            symbol: selected.symbol,
+            range: selected.range,
+            interval: selected.interval,
+          },
+          attempts: selected.attempts.map((a) => ({
+            sourceName: a.sourceName,
+            symbol: a.symbol,
+            range: a.range,
+            interval: a.interval,
+            qualityScore: a.qualityScore,
+            qualityLabel: a.qualityLabel,
+            rawCount: a.rawCount,
+            cleanCount: a.cleanCount,
+            issues: a.issues,
+            ok: a.ok,
+          })),
+        };
         setTechnicalContext(ctx);
         setTechnicalStatus(ctx.status === "available"
-          ? `technical context ready: ${ctx.technicalBias} / ${ctx.technicalConfidence}`
+          ? `technical context ready: ${ctx.sourceName}:${ctx.symbol} ${ctx.technicalBias} / ${ctx.technicalConfidence} quality=${ctx.dataQuality?.qualityLabel}`
           : ctx.status === "unreliable"
-            ? `technical context unreliable: ${ctx.sanityIssues?.join(", ") || "sanity issues"}`
+            ? `technical context unreliable: ${ctx.sourceName}:${ctx.symbol} ${ctx.sanityIssues?.join(", ") || "sanity issues"}`
             : `technical context ${ctx.status}: ${ctx.reason || ""}`);
         return ctx;
       } catch (err) {
         const ctx = {
-          symbol: "GC=F",
-          proxy: "Gold futures proxy for XAUUSD",
+          symbol: "none",
+          sourceName: "none",
+          proxy: "No technical data source available.",
           status: "error",
+          reliability: "unreliable",
+          usableForScenario: false,
           error: err.message,
           timeframes: {},
           technicalBias: "unknown",
           technicalConfidence: 0,
+          dataQuality: {
+            qualityScore: 0,
+            qualityLabel: "error",
+            issues: [err.message],
+          },
         };
         setTechnicalContext(ctx);
         setTechnicalStatus(`technical context error: ${err.message}`);
@@ -6045,6 +6338,19 @@ ${err.message}`);
             "technicalBias"
           ],
           diagnosticSummary: "Technical data failed sanity checks. Raw trend/EMA/RSI/support/resistance fields are intentionally masked and must not be used as directional evidence.",
+          dataQuality: ctx.dataQuality || null,
+          sourceSelection: ctx.sourceSelection ? {
+            selected: ctx.sourceSelection.selected,
+            attempts: ctx.sourceSelection.attempts?.map((a) => ({
+              sourceName: a.sourceName,
+              symbol: a.symbol,
+              qualityScore: a.qualityScore,
+              qualityLabel: a.qualityLabel,
+              cleanCount: a.cleanCount,
+              issues: a.issues,
+              ok: a.ok,
+            }))
+          } : null,
           guardrails: [
             "Do not use this technical context as bullish or bearish evidence.",
             "Do not mention raw mild-bullish/mild-bearish labels from the original technical calculation.",
@@ -6068,7 +6374,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.33.4",
+        appVersion: "GoldScope v2.34",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -6150,6 +6456,7 @@ STRICT SOURCE RULES:
 19. If technicalContext.status is "unreliable" or technicalContext.usableForScenario is false, do not use it as directional evidence; describe it only as a failed/diagnostic technical read.
 20. Do not describe EMA20 below EMA200 as bullish. Price above EMA200 alone is only mild support and can be contradicted by EMA alignment or overbought RSI.
 21. If technicalContext.usableForScenario is false, do not mention mild-bullish, mild-bearish, RSI, EMA, ATR, support, resistance, or priceVsEMA200 as scenario evidence unless those fields are explicitly present in the masked technicalContext.
+22. If technicalContext.sourceSelection exists, you may summarize source quality and selected symbol, but do not treat failed/weak sources as evidence.
 
 MACRO LOGIC GUARD:
 Apply these rules unless the GoldScope state explicitly contradicts them:
@@ -6436,7 +6743,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.33.4",
+        appVersion: "GoldScope v2.34",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -6470,7 +6777,7 @@ ${err.stack || err.message || String(err)}`);
     return (
       <div style={{ display: "grid", gap: 16 }}>
         <Card>
-          <Title icon="🤖" title="AI Engine - Validation-Gated Safe Report" sub="Prompt is generated automatically. No manual prompt editing is needed." />
+          <Title icon="🤖" title="AI Engine - Technical Data Source Repair" sub="Prompt is generated automatically. No manual prompt editing is needed." />
 
           <Card style={{ background: "#170a12", borderColor: "#7f1d1d", marginBottom: 14 }}>
             <b style={{ color: C.red }}>Important:</b>{" "}
@@ -6549,12 +6856,16 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Line-based NFP validator: on</Badge>
               <Badge value="supportive">Validation gate: on</Badge>
               <Badge value="supportive">Safe report: on</Badge>
+              <Badge value="supportive">Technical source repair: on</Badge>
+              <Badge value="supportive">XAUUSD first: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
               <Badge value="supportive">Event validator: on</Badge>
               <Badge value="supportive">Line-based NFP validator: on</Badge>
               <Badge value="supportive">Validation gate: on</Badge>
-              <Badge value="supportive">Safe report: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
+              <Badge value="supportive">Safe report: on</Badge>
+              <Badge value="supportive">Technical source repair: on</Badge>
+              <Badge value="supportive">XAUUSD first: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
 

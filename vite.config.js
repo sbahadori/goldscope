@@ -8,6 +8,12 @@ export default defineConfig({
     port: 3000,
     strictPort: true,
     proxy: {
+      '/api/stooq': {
+        target: 'https://stooq.com',
+        changeOrigin: true,
+        secure: true,
+        rewrite: (path) => path.replace(/^\/api\/stooq/, ''),
+      },
       '/api/gdelt': {
         target: 'https://api.gdeltproject.org',
         changeOrigin: true,

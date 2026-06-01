@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.33.4 - Validation-Gated Safe Report
+title GoldScope v2.34 - Technical Data Source Repair
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.33.4 - Validation-Gated Safe Report
+echo   GoldScope v2.34 - Technical Data Source Repair
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.
