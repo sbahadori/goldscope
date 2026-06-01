@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.40.5 - RSI Numeric Parser Context Isolation
+title GoldScope v2.40.9 - Targeted RSI Extreme Claim Sanitizer
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.40.5 - RSI Numeric Parser Context Isolation
+echo   GoldScope v2.40.9 - Targeted RSI Extreme Claim Sanitizer
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.

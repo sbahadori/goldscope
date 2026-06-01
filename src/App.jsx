@@ -2915,6 +2915,59 @@ function classifyTechnicalSanityIssues(sanityIssues, cleaned) {
 }
 
 
+
+function classifyRsiClassicState(rsiValue) {
+  const r = Number(rsiValue);
+  if (!Number.isFinite(r)) return "unknown";
+  if (r > 70) return "overbought";
+  if (r < 30) return "oversold";
+  return "not_extreme";
+}
+
+function classifyStochRsiState(stochRsiValue) {
+  const k = Number(stochRsiValue?.k);
+  if (!Number.isFinite(k)) return "unknown";
+  if (k >= 80) return "overbought";
+  if (k <= 20) return "oversold";
+  return "not_extreme";
+}
+
+function buildRsiStochRsiLanguageHint(rsiValue, stochRsiValue) {
+  const rsiClassicState = classifyRsiClassicState(rsiValue);
+  const stochRsiState = classifyStochRsiState(stochRsiValue);
+
+  let requiredPhrase = "";
+  if (rsiClassicState === "not_extreme" && stochRsiState === "overbought") {
+    requiredPhrase = "RSI14 is not at a classic extreme; Stochastic RSI is overbought.";
+  } else if (rsiClassicState === "not_extreme" && stochRsiState === "oversold") {
+    requiredPhrase = "RSI14 is not at a classic extreme; Stochastic RSI is oversold.";
+  } else if (rsiClassicState === "overbought" && stochRsiState === "overbought") {
+    requiredPhrase = "RSI14 is overbought; Stochastic RSI is also overbought.";
+  } else if (rsiClassicState === "oversold" && stochRsiState === "oversold") {
+    requiredPhrase = "RSI14 is oversold; Stochastic RSI is also oversold.";
+  } else if (rsiClassicState === "overbought") {
+    requiredPhrase = "RSI14 is overbought; Stochastic RSI is not at a matching extreme.";
+  } else if (rsiClassicState === "oversold") {
+    requiredPhrase = "RSI14 is oversold; Stochastic RSI is not at a matching extreme.";
+  } else if (rsiClassicState === "not_extreme" && stochRsiState === "not_extreme") {
+    requiredPhrase = "RSI14 is not at a classic extreme; Stochastic RSI is not at a classic extreme.";
+  } else {
+    requiredPhrase = "RSI14 and Stochastic RSI states are not both available; do not infer RSI extremes.";
+  }
+
+  return {
+    available: true,
+    rsiClassicState,
+    stochRsiState,
+    rsi14: round2(rsiValue),
+    stochRsiK: round2(stochRsiValue?.k),
+    stochRsiD: round2(stochRsiValue?.d),
+    requiredPhrase,
+    instruction: "When technicalLanguageHints.requiredPhrase exists, copy it exactly in the Technical confirmation section.",
+  };
+}
+
+
 function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timeframe = "1h", sourceName = "yahoo") {
   const cleaned = sanitizeCandles(candles, symbol);
   const c = cleaned.candles;
@@ -2961,6 +3014,7 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
   const bollinger20 = computeBollinger(closes, 20, 2);
   const keltner20 = computeKeltner(c, 20, 2);
   const stochRsi14 = computeStochRsi(closes, 14, 14, 3);
+  const technicalLanguageHints = buildRsiStochRsiLanguageHint(rsi14, stochRsi14);
   const { support, resistance } = estimateSupportResistance(c, 60);
   const trend = classifyTrend(price, ema20, ema50, ema200);
   const momentum = classifyMomentum(rsi14, price, prevPrice);
@@ -3120,6 +3174,7 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
           d: round2(stochRsi14.d),
           state: stochRsi14.state,
         },
+        technicalLanguageHints,
         expandedIndicatorScore: round2(expandedScore),
         strategyModules,
         strategyScoreContribution: round2(strategyScoreContribution),
@@ -3131,6 +3186,7 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
         structure: trend === "neutral/range" ? "range/unclear" : trend,
       },
     },
+    technicalLanguageHints,
     technicalIndicators: {
       available: true,
       set: ["MACD(12,26,9)", "ADX(14)", "Bollinger(20,2)", "Keltner(20,2)", "Stochastic RSI(14,14,3)"],
@@ -3391,6 +3447,10 @@ function describeTechnicalForSafeReport(tech) {
   const bollingerText = tf.bollinger20 ? `Bollinger20 position=${tf.bollinger20.position}, upper=${tf.bollinger20.upper}, middle=${tf.bollinger20.middle}, lower=${tf.bollinger20.lower}, bandwidth=${tf.bollinger20.bandwidthPct}%` : "Bollinger20=not available";
   const keltnerText = tf.keltner20 ? `Keltner20 position=${tf.keltner20.position}, upper=${tf.keltner20.upper}, middle=${tf.keltner20.middle}, lower=${tf.keltner20.lower}, width=${tf.keltner20.widthPct}%` : "Keltner20=not available";
   const stochRsiText = tf.stochRsi14 ? `StochRSI14 K=${tf.stochRsi14.k}, D=${tf.stochRsi14.d}, state=${tf.stochRsi14.state}` : "StochRSI14=not available";
+  const languageHint = tech.technicalLanguageHints || tf.technicalLanguageHints || null;
+  const languageHintText = languageHint?.requiredPhrase
+    ? `Required RSI/StochRSI wording: ${languageHint.requiredPhrase}`
+    : "Required RSI/StochRSI wording: not available";
   const expandedScoreText = tf.expandedIndicatorScore ?? "unknown";
   const strategy = tech.strategyModules || tf.strategyModules || {};
   const modules = strategy.modules || {};
@@ -3409,7 +3469,7 @@ function describeTechnicalForSafeReport(tech) {
     implication: `${bias} technical confirmation context; must not override incomplete macro/event evidence`,
     reliability: qLabel,
     usable: true,
-    section: `Technical context is available and usable only as confirmation context, not as a macro override. Selected source: ${sourceText}. Data quality: ${qLabel} with score ${qScore}. Technical bias: ${bias} with confidence ${conf}. On ${tfKey || "selected timeframe"}, trend=${trend}, momentum=${momentum}, priceVsEMA200=${priceVs}, RSI14=${rsi}, ATR14=${atr}, EMA20=${ema20}, EMA50=${ema50}, EMA200=${ema200}. Expanded indicators: ${macdText}; ${adxText}; ${bollingerText}; ${keltnerText}; ${stochRsiText}; expandedIndicatorScore=${expandedScoreText}. ${strategyText}. Support=${support}; resistance=${resistance}. This can confirm, weaken, or contradict macro context, but it cannot override missing FRED drivers, blank event actual/forecast values, or absent replay evidence.${mtfText}`,
+    section: `Technical context is available and usable only as confirmation context, not as a macro override. Selected source: ${sourceText}. Data quality: ${qLabel} with score ${qScore}. Technical bias: ${bias} with confidence ${conf}. On ${tfKey || "selected timeframe"}, trend=${trend}, momentum=${momentum}, priceVsEMA200=${priceVs}, RSI14=${rsi}, ATR14=${atr}, EMA20=${ema20}, EMA50=${ema50}, EMA200=${ema200}. Expanded indicators: ${macdText}; ${adxText}; ${bollingerText}; ${keltnerText}; ${stochRsiText}; expandedIndicatorScore=${expandedScoreText}. RSI14 and Stochastic RSI are treated separately; Stochastic RSI extremes are not described as RSI extremes. ${languageHintText} ${strategyText}. Support=${support}; resistance=${resistance}. This can confirm, weaken, or contradict macro context, but it cannot override missing FRED drivers, blank event actual/forecast values, or absent replay evidence.${mtfText}`,
     alignment: bias,
   };
 }
@@ -3700,6 +3760,113 @@ function sectionMentionsTechnicalSupportsBullish(text) {
   return /(technical|multi[- ]timeframe)[\s\S]{0,160}(supports|strengthens|confirms as context|adds confirmation context)[\s\S]{0,120}(bullish|upside)/i.test(bullish)
     || /(bullish technical|technical bias is bullish)[\s\S]{0,160}(supports|strengthens|adds)/i.test(bullish);
 }
+
+
+function sanitizeRawAiTechnicalEvidenceLanguage(rawOutput, snapshot) {
+  let out = String(rawOutput || "");
+  const hint = snapshot?.technicalContext?.technicalLanguageHints;
+  const phrase = hint?.requiredPhrase;
+
+  if (!phrase) {
+    return {
+      output: out,
+      applied: false,
+      changes: [],
+    };
+  }
+
+  const changes = [];
+
+  function replaceAndTrack(regex, replacement, label) {
+    const before = out;
+    out = out.replace(regex, replacement);
+    if (out !== before) changes.push(label);
+  }
+
+  // Scope: technical wording only.
+  // Do NOT alter macro decision gates, NFP logic, CPI/yield logic, event outcomes, or scenario labels.
+  // 1) Prevent technical-only evidence from being framed as "Confirmed evidence".
+  replaceAndTrack(
+    /Confirmed evidence\s*:\s*(?=(?:[^\n]*(?:Technical context|technical context|Technicals|technicals|Technical bias|technical bias|EMA|RSI|MACD|ADX|Bollinger|Keltner|Stoch(?:astic)?\s*RSI|strategy modules?)))/g,
+    "Technical confirmation context: ",
+    "technical_confirmed_evidence_header"
+  );
+
+  replaceAndTrack(
+    /Confirmed evidence\s*:\s*\n(?=\s*[-*]?\s*(?:Technical context|technical context|Technicals|technicals|Technical bias|technical bias|EMA|RSI|MACD|ADX|Bollinger|Keltner|Stoch(?:astic)?\s*RSI|strategy modules?))/g,
+    "Technical confirmation context:\n",
+    "technical_confirmed_evidence_multiline_header"
+  );
+
+  // 2) Targeted RSI/StochRSI conflation sanitizer.
+  // Only sanitize definitive RSI extreme claims.
+  // DO NOT sanitize softer language such as:
+  // - RSI is near overbought
+  // - RSI approaches overbought
+  // - RSI is close to overbought
+  // - RSI is below the overbought threshold
+  // These are not definitive false claims and may be valid when RSI is near 70.
+  const definitiveRsiExtremePatterns = [
+    {
+      regex: /\bRSI(?:14)?\s+is\s+overbought\b/gi,
+      label: "rsi_is_overbought_to_required_phrase",
+    },
+    {
+      regex: /\bRSI(?:14)?\s+shows\s+overbought\b/gi,
+      label: "rsi_shows_overbought_to_required_phrase",
+    },
+    {
+      regex: /\bRSI(?:14)?\s+indicates\s+overbought\b/gi,
+      label: "rsi_indicates_overbought_to_required_phrase",
+    },
+    {
+      regex: /\bRSI(?:14)?\s+remains\s+overbought\b/gi,
+      label: "rsi_remains_overbought_to_required_phrase",
+    },
+    {
+      regex: /\boverbought\s+RSI(?:14)?\b/gi,
+      label: "overbought_rsi_to_required_phrase",
+    },
+    {
+      regex: /\bRSI(?:14)?\s+is\s+oversold\b/gi,
+      label: "rsi_is_oversold_to_required_phrase",
+    },
+    {
+      regex: /\bRSI(?:14)?\s+shows\s+oversold\b/gi,
+      label: "rsi_shows_oversold_to_required_phrase",
+    },
+    {
+      regex: /\bRSI(?:14)?\s+indicates\s+oversold\b/gi,
+      label: "rsi_indicates_oversold_to_required_phrase",
+    },
+    {
+      regex: /\bRSI(?:14)?\s+remains\s+oversold\b/gi,
+      label: "rsi_remains_oversold_to_required_phrase",
+    },
+    {
+      regex: /\boversold\s+RSI(?:14)?\b/gi,
+      label: "oversold_rsi_to_required_phrase",
+    },
+  ];
+
+  for (const item of definitiveRsiExtremePatterns) {
+    replaceAndTrack(item.regex, phrase, item.label);
+  }
+
+  // 3) If a line explicitly says technicals are confirmed evidence, downgrade wording.
+  replaceAndTrack(
+    /\btechnical(?:s| context| bias)?\s+(?:is|are)\s+confirmed evidence\b/gi,
+    "technical context is confirmation context",
+    "technical_confirmed_sentence"
+  );
+
+  return {
+    output: out,
+    applied: changes.length > 0,
+    changes: [...new Set(changes)],
+  };
+}
+
 
 function validateAiGoldReport(output, snapshot) {
   const issues = [];
@@ -8090,7 +8257,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.40.5.2",
+        appVersion: "GoldScope v2.40.9.2",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -8178,7 +8345,13 @@ STRICT SOURCE RULES:
 24. If alignmentContext exists, use it as the final macro/technical alignment rule; it can confirm, weaken, or contradict, but cannot override missing macro/event/replay evidence.
 25. If technicalContext contains expanded indicators, summarize MACD, ADX, Bollinger Bands, Keltner Channels, and Stochastic RSI as confirmation context only. Do not call these confirmed macro evidence.
 26. Do not call Stochastic RSI overbought unless K >= 80; do not call it oversold unless K <= 20.
+26a. RSI and Stochastic RSI are different indicators. If only Stochastic RSI is overbought/oversold, write "Stochastic RSI is overbought/oversold"; do not write "RSI is overbought/oversold".
+26b. Do not call RSI overbought unless an RSI14 value is > 70. Do not call RSI oversold unless an RSI14 value is < 30.
+26c. If RSI14 is between 30 and 70 but Stochastic RSI is at an extreme, say: "RSI is not at a classic extreme, while Stochastic RSI shows short-term overextension/exhaustion." 
 27. If technicalContext.strategyModules exists, summarize Trend, Momentum, Volatility, and Structure modules as technical confirmation/contradiction context only. Do not treat strategy modules as trade instructions or confirmed macro evidence.
+28. If technicalLanguageHints.requiredPhrase exists, copy it exactly in the Technical confirmation section. Do not paraphrase it.
+29. Technical context must never be written under "Confirmed evidence"; use "Technical confirmation context" instead.
+30. Do not write definitive RSI extreme claims unless supported by RSI14 values. Soft wording such as "near overbought" must not be converted into a definitive extreme claim.
 25. If replayEvidence.count > 0, summarize latest and recent replay reaction patterns. Treat replay as evidence only when qualityScore is adequate and event context is comparable.
 
 MACRO LOGIC GUARD:
@@ -8217,8 +8390,11 @@ Before finalizing, check your own answer for these mistakes:
 - Weak NFP/labor with falling yields/USD is generally gold-supportive; strong NFP/labor with rising yields/USD is generally gold-negative.
 - Do not use invented examples after "e.g." when forecast/actual values are blank.
 - Do not write <think>, </think>, /think, hidden reasoning, or planning artifacts.
-- Do not call RSI overbought unless at least one provided RSI value is above 70.
-- Do not call RSI oversold unless at least one provided RSI value is below 30.
+- Do not call RSI overbought unless at least one provided RSI14 value is above 70.
+- Do not call RSI oversold unless at least one provided RSI14 value is below 30.
+- Do not shorten "Stochastic RSI is overbought" to "RSI is overbought"; they are different indicators.
+- If Stochastic RSI is overbought but RSI14 is not above 70, write that Stochastic RSI shows short-term overextension while RSI14 is not at a classic overbought extreme.
+- If Stochastic RSI is oversold but RSI14 is not below 30, write that Stochastic RSI shows short-term exhaustion while RSI14 is not at a classic oversold extreme.
 - Do not place technical context under Confirmed evidence. Technicals are confirmation/contradiction context only.
 - The Next catalyst plan must use deterministicScenarioLab.nextMajor/calendar.nextMajor exactly. Do not replace it with a later FOMC/CPI/PCE event.
 
@@ -8278,6 +8454,8 @@ Use this table. In the News row, explicitly mention contextQualityFlags.newsStre
 
 7. Technical confirmation
 - If technicalContext is available, summarize trend, EMA alignment, RSI14, ATR14, support/resistance, technicalBias, expanded indicators, and strategyModules.
+- Keep RSI14 and Stochastic RSI wording separate. Example: "RSI14 is not at a classic extreme; Stochastic RSI is overbought." Do not write "RSI is overbought" unless RSI14 > 70.
+- If technicalLanguageHints.requiredPhrase exists, copy it exactly in this section.
 - If technicalContext.status is unreliable or usableForScenario is false, say it is unreliable/masked and do not use it as directional evidence.
 - Explain whether technical context confirms, weakens, or contradicts the macro scenario only when usableForScenario is true.
 - If technicalContext is missing/error, say it is unavailable.
@@ -8409,7 +8587,9 @@ ${JSON.stringify(data, null, 2)}`);
             setAiStatus(out.trim().toUpperCase() === "OK" ? "smoke test OK" : "smoke test returned non-OK output");
           } else {
             const snapshotForValidation = contextSnapshot || buildGoldScopeContextSnapshot();
-            const validation = validateAiGoldReport(out, snapshotForValidation);
+            const sanitized = sanitizeRawAiTechnicalEvidenceLanguage(out, snapshotForValidation);
+            const outputForValidation = sanitized.output;
+            const validation = validateAiGoldReport(outputForValidation, snapshotForValidation);
             const validationText = formatValidationReport(validation);
             const highSeverity = validation.issues.some((i) => i.severity === "high");
 
@@ -8418,12 +8598,15 @@ ${JSON.stringify(data, null, 2)}`);
               setAiOutput(safeReport);
               setAiStatus("AI rejected: safe report generated");
             } else {
+              const sanitizerNote = sanitized.applied
+                ? `\n\n---\nRAW AI TECHNICAL LANGUAGE SANITIZER\nApplied technical-language cleanup only: ${sanitized.changes.join(", ")}. Macro/event logic was not changed.`
+                : "";
               const decorated = validation.issues.length
-                ? `${out}\n\n---\n${validationText}`
-                : out;
+                ? `${outputForValidation}${sanitizerNote}\n\n---\n${validationText}`
+                : `${outputForValidation}${sanitizerNote}`;
               setAiOutput(decorated);
               setAiStatus(validation.ok
-                ? (out.includes("<END_GOLDSCOPE_REPORT>") ? "complete + validation passed" : "complete, but end marker missing")
+                ? (outputForValidation.includes("<END_GOLDSCOPE_REPORT>") ? "complete + validation passed" : "complete, but end marker missing")
                 : "validation warning: review output");
             }
           }
@@ -8470,7 +8653,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.5.2",
+        appVersion: "GoldScope v2.40.9.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -8605,6 +8788,10 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Technical quality gate calibrated: on</Badge>
               <Badge value="supportive">RSI threshold parser fix: on</Badge>
               <Badge value="supportive">RSI context isolation: on</Badge>
+              <Badge value="supportive">RSI vs StochRSI prompt guard: on</Badge>
+              <Badge value="supportive">Precomputed RSI/StochRSI hint: on</Badge>
+              <Badge value="supportive">Raw AI technical sanitizer: on</Badge>
+              <Badge value="supportive">Targeted RSI extreme sanitizer: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -8617,6 +8804,10 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">StochRSI overextension warning-only: on</Badge>
               <Badge value="supportive">RSI below/above threshold ignored: on</Badge>
               <Badge value="supportive">Unrelated numbers ignored: on</Badge>
+              <Badge value="supportive">StochRSI wording clarified: on</Badge>
+              <Badge value="supportive">Required RSI phrase: on</Badge>
+              <Badge value="supportive">Technical confirmed-evidence sanitizer: on</Badge>
+              <Badge value="supportive">near/approaching RSI untouched: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
@@ -8647,6 +8838,10 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Technical quality gate calibrated: on</Badge>
               <Badge value="supportive">RSI threshold parser fix: on</Badge>
               <Badge value="supportive">RSI context isolation: on</Badge>
+              <Badge value="supportive">RSI vs StochRSI prompt guard: on</Badge>
+              <Badge value="supportive">Precomputed RSI/StochRSI hint: on</Badge>
+              <Badge value="supportive">Raw AI technical sanitizer: on</Badge>
+              <Badge value="supportive">Targeted RSI extreme sanitizer: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -8659,6 +8854,10 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">StochRSI overextension warning-only: on</Badge>
               <Badge value="supportive">RSI below/above threshold ignored: on</Badge>
               <Badge value="supportive">Unrelated numbers ignored: on</Badge>
+              <Badge value="supportive">StochRSI wording clarified: on</Badge>
+              <Badge value="supportive">Required RSI phrase: on</Badge>
+              <Badge value="supportive">Technical confirmed-evidence sanitizer: on</Badge>
+              <Badge value="supportive">near/approaching RSI untouched: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
@@ -8745,7 +8944,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.5.2",
+        appVersion: "GoldScope v2.40.9.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -8948,7 +9147,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.5.2",
+        appVersion: "GoldScope v2.40.9.2",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -9242,7 +9441,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.40.5.2</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.40.9.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
