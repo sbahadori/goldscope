@@ -2607,27 +2607,100 @@ function safeValue(x, fallback = "missing") {
   return x === undefined || x === null || x === "" ? fallback : x;
 }
 
+function describeTechnicalForSafeReport(tech) {
+  if (!tech) {
+    return {
+      summary: "Technical context is unavailable.",
+      evidenceRowState: "Unavailable",
+      implication: "No technical confirmation",
+      reliability: "missing",
+      usable: false,
+      section: "Technical context is unavailable and cannot confirm, weaken, or contradict the macro scenario.",
+      alignment: "unavailable",
+    };
+  }
+
+  if (tech.usableForScenario === false || tech.status === "unreliable") {
+    const issues = (tech.sanityIssues || []).join(", ") || "not specified";
+    return {
+      summary: `Technical context is unreliable/masked. Sanity issues: ${issues}.`,
+      evidenceRowState: `Masked/unreliable (${issues})`,
+      implication: "Not usable as directional evidence",
+      reliability: tech.reliability || tech.status || "unreliable",
+      usable: false,
+      section: `Technical context is unreliable/masked and unusable for scenario evidence. Sanity issues: ${issues}. Technical context must not confirm, weaken, or contradict the macro scenario until usableForScenario=true.`,
+      alignment: "unusable",
+    };
+  }
+
+  const tfKey = Object.keys(tech.timeframes || {})[0];
+  const tf = tfKey ? tech.timeframes[tfKey] : {};
+  const selected = tech.sourceSelection?.selected;
+  const sourceText = selected
+    ? `${selected.sourceName}:${selected.symbol} ${selected.range}/${selected.interval}`
+    : `${tech.sourceName || "unknown"}:${tech.symbol || "unknown"}`;
+
+  const bias = tech.technicalBias || "unknown";
+  const conf = tech.technicalConfidence ?? "unknown";
+  const trend = tf.trend || "unknown";
+  const momentum = tf.momentum || "unknown";
+  const priceVs = tf.priceVsEMA200 || "unknown";
+  const rsi = tf.rsi14 ?? "unknown";
+  const atr = tf.atr14 ?? "unknown";
+  const ema20 = tf.ema20 ?? "unknown";
+  const ema50 = tf.ema50 ?? "unknown";
+  const ema200 = tf.ema200 ?? "unknown";
+  const support = Array.isArray(tf.support) && tf.support.length ? tf.support.join(", ") : "not available";
+  const resistance = Array.isArray(tf.resistance) && tf.resistance.length ? tf.resistance.join(", ") : "not available";
+  const qLabel = tech.dataQuality?.qualityLabel || tech.reliability || "unknown";
+  const qScore = tech.dataQuality?.qualityScore ?? "unknown";
+
+  return {
+    summary: `Technical context is usable as confirmation context only: ${bias} bias, confidence ${conf}, source ${sourceText}, quality ${qLabel}/${qScore}.`,
+    evidenceRowState: `${bias} bias; trend=${trend}; momentum=${momentum}; priceVsEMA200=${priceVs}; source=${sourceText}`,
+    implication: `${bias} technical confirmation context; must not override incomplete macro/event evidence`,
+    reliability: qLabel,
+    usable: true,
+    section: `Technical context is available and usable only as confirmation context, not as a macro override. Selected source: ${sourceText}. Data quality: ${qLabel} with score ${qScore}. Technical bias: ${bias} with confidence ${conf}. On ${tfKey || "selected timeframe"}, trend=${trend}, momentum=${momentum}, priceVsEMA200=${priceVs}, RSI14=${rsi}, ATR14=${atr}, EMA20=${ema20}, EMA50=${ema50}, EMA200=${ema200}, support=${support}, resistance=${resistance}. This can confirm, weaken, or contradict macro context, but it cannot override missing FRED drivers, blank event actual/forecast values, or absent replay evidence.`,
+    alignment: bias,
+  };
+}
+
+function inferMacroTechnicalAlignment(snapshot, techDesc) {
+  const macro = String(snapshot?.deterministicScenarioLab?.macroDirection || "mixed").toLowerCase();
+  const techBias = String(snapshot?.technicalContext?.technicalBias || "").toLowerCase();
+
+  if (!techDesc.usable) return "Technical alignment is unavailable because technical context is not usable.";
+
+  const macroSupportive = macro.includes("supportive") || macro.includes("bullish") || macro.includes("positive");
+  const macroNegative = macro.includes("negative") || macro.includes("bearish");
+  const techBullish = techBias.includes("bullish");
+  const techBearish = techBias.includes("bearish");
+
+  if (macroSupportive && techBullish) return "Macro and technical context are directionally aligned, but confidence remains capped by missing drivers and event outcomes.";
+  if (macroNegative && techBearish) return "Macro and technical context are directionally aligned to the downside, but confidence remains capped by missing drivers and event outcomes.";
+  if (macroSupportive && techBearish) return "Technical context contradicts or weakens the supportive macro read; Wait-Neutral is appropriate.";
+  if (macroNegative && techBullish) return "Technical context contradicts or weakens the negative macro read; Wait-Neutral is appropriate.";
+  return "Macro/technical alignment is mixed or insufficient; Wait-Neutral remains appropriate.";
+}
+
 function buildValidationSafeGoldReport(snapshot, validation) {
   const nextMajor = getNextMajorEvent(snapshot) || {};
   const flags = snapshot?.contextQualityFlags || {};
   const tech = snapshot?.technicalContext || {};
+  const techDesc = describeTechnicalForSafeReport(tech);
+  const alignmentText = inferMacroTechnicalAlignment(snapshot, techDesc);
   const fredRows = snapshot?.dataReadiness?.fredRows ?? 0;
   const newsItems = snapshot?.dataReadiness?.newsItems ?? 0;
   const replayRecords = snapshot?.dataReadiness?.replayRecords ?? 0;
   const missing = flags.missingCriticalMacroDrivers || [];
   const maxConf = Number(flags.maxRecommendedConfidence ?? 25);
-  const safeConfidence = Math.min(maxConf, 25);
+  const safeConfidence = Math.min(maxConf, techDesc.usable ? 25 : 15);
 
   const nextName = safeValue(nextMajor.name, "No next major event found");
   const nextDate = safeValue(nextMajor.date, "missing date");
   const nextTime = safeValue(nextMajor.time, "missing time");
   const avoidWindow = safeValue(nextMajor.avoidWindow, "missing avoid-window");
-
-  const techLine = tech.usableForScenario === false || tech.status === "unreliable"
-    ? `Technical context is unreliable/masked and unusable for scenario evidence. Sanity issues: ${(tech.sanityIssues || []).join(", ") || "not specified"}.`
-    : tech.status === "available"
-      ? `Technical context is available and may be used only as confirmation, not as macro override.`
-      : `Technical context is unavailable.`;
 
   const validationLines = (validation?.issues || [])
     .map((i, idx) => `${idx + 1}. [${String(i.severity || "").toUpperCase()}] ${i.code}: ${i.message}`)
@@ -2638,12 +2711,12 @@ The original AI report was rejected because it failed high-severity validation. 
 
 1. Dominant research scenario
 Wait-Neutral.
-The system should not assign a bullish or bearish research scenario because macro drivers are incomplete, news strength is weak, replay evidence is missing, and event outcomes are still blank. Missing critical macro drivers: ${missing.length ? missing.join(", ") : "none listed"}. Technical context is not usable for scenario evidence.
+The system should not assign a bullish or bearish research scenario because macro drivers are incomplete, news strength is weak, replay evidence is missing, and event outcomes are still blank. Missing critical macro drivers: ${missing.length ? missing.join(", ") : "none listed"}. ${techDesc.usable ? "Technical context is usable only as confirmation context, not as a standalone scenario driver." : "Technical context is not usable for scenario evidence."} ${alignmentText}
 
 2. Confidence score
 ${safeConfidence}.
 Reason: confidence is capped because source quality is incomplete and high-severity validation errors were detected in the AI output.
-Confidence reducers: incomplete FRED coverage (${fredRows}/11 loaded), newsStrength=${safeValue(flags.newsStrength)}, macroRelevantNewsCount=${safeValue(flags.macroRelevantNewsCount, 0)}, replayRecords=${replayRecords}, technicalStatus=${safeValue(tech.status)}, eventDataCompleteness=${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)}.
+Confidence reducers: incomplete FRED coverage (${fredRows}/11 loaded), newsStrength=${safeValue(flags.newsStrength)}, macroRelevantNewsCount=${safeValue(flags.macroRelevantNewsCount, 0)}, replayRecords=${replayRecords}, technicalStatus=${safeValue(tech.status)}, technicalUsable=${safeValue(tech.usableForScenario)}, eventDataCompleteness=${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)}.
 
 3. Evidence table
 | Evidence block | Current state | Gold implication | Reliability |
@@ -2652,44 +2725,47 @@ Confidence reducers: incomplete FRED coverage (${fredRows}/11 loaded), newsStren
 | News | ${newsItems} item(s); newsStrength=${safeValue(flags.newsStrength)}; macroRelevantNewsCount=${safeValue(flags.macroRelevantNewsCount, 0)} | Not sufficient for directional confirmation | ${safeValue(flags.newsStrength)} |
 | Calendar/event risk | ${nextName} on ${nextDate} ${nextTime}; forecast/actual fields are missing | Conditional only | ${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)} |
 | Replay evidence | ${replayRecords} replay record(s) | No historical validation | ${safeValue(flags.replayReliability)} |
-| Technical context | ${tech.status === "unreliable" ? "masked/unreliable" : safeValue(tech.status)} | Not usable as directional evidence unless usableForScenario=true | ${safeValue(tech.reliability || tech.status)} |
+| Technical context | ${techDesc.evidenceRowState} | ${techDesc.implication} | ${techDesc.reliability} |
 | Source/data readiness | FRED rows=${fredRows}; news items=${newsItems}; TradingEconomics/Reddit/YouTube may be missing | Limited source coverage | partial |
 
 4. Bullish case for gold
 Confirmed evidence: none.
 Conditional evidence: if future labor data weakens expectations and yields/USD fall, gold may receive support; if inflation is hot while real yields fall, gold may receive support. These are conditional gates only because actual and forecast values are missing.
-Missing evidence: confirmed labor outcome, confirmed CPI/PCE outcome, complete real-yield and USD drivers, replay evidence, and usable technical confirmation.
+Technical confirmation context: ${techDesc.usable ? `technical bias is ${safeValue(tech.technicalBias)}. If this bias supports the bullish gate after the event, it may strengthen confirmation; if it conflicts, it should keep the system Wait-Neutral.` : "not usable."}
+Missing evidence: confirmed labor outcome, confirmed CPI/PCE outcome, complete real-yield and USD drivers, replay evidence, and event-time technical reaction.
 Invalidation conditions: if labor data strengthens expectations and yields/USD rise, or if hot inflation lifts real yields, the bullish case weakens.
 
 5. Bearish case for gold
 Confirmed evidence: none.
 Conditional evidence: if future labor data strengthens expectations and yields/USD rise, gold may face pressure; if inflation is hot and real yields rise, gold may face pressure. These are conditional gates only.
-Missing evidence: confirmed labor outcome, confirmed inflation outcome, complete FRED macro drivers, replay evidence, and usable technical context.
+Technical confirmation context: ${techDesc.usable ? `technical bias is ${safeValue(tech.technicalBias)}. If this bias supports the bearish gate after the event, it may strengthen confirmation; if it conflicts, it should keep the system Wait-Neutral.` : "not usable."}
+Missing evidence: confirmed labor outcome, confirmed inflation outcome, complete FRED macro drivers, replay evidence, and event-time technical reaction.
 Invalidation conditions: if labor data weakens expectations and yields/USD fall, or if real yields fall despite hot inflation, the bearish case weakens.
 
 6. Wait/neutral case
-Wait-Neutral is the appropriate state because the snapshot lacks confirmed event outcomes, replay evidence, complete macro drivers, strong macro-relevant news, and usable technical confirmation. The system should wait for actual data and market reaction rather than infer direction.
+Wait-Neutral is the appropriate state because the snapshot lacks confirmed event outcomes, replay evidence, complete macro drivers, and strong macro-relevant news. ${techDesc.usable ? "Technical context is available, but it is only confirmation context and cannot override missing macro/event evidence. " + alignmentText : "Technical context is not usable as confirmation."}
 
 7. Technical confirmation
-${techLine}
-Technical context must not confirm, weaken, or contradict the macro scenario until usableForScenario=true.
+${techDesc.section}
+Alignment note: ${alignmentText}
 
 8. Decision gates
 - If NFP materially weakens labor expectations and yields/USD fall, then gold may rise.
 - If NFP strengthens labor expectations and yields/USD rise, then gold may fall.
 - If CPI is hot but real yields fall, then gold may rise.
 - If CPI is hot and real yields rise, then gold may fall.
-- If replay evidence after the event contradicts the expected macro reaction, keep Wait-Neutral.
+- If technical context confirms the post-event macro reaction, confidence may improve within the evidence cap.
+- If technical context contradicts the post-event macro reaction, keep Wait-Neutral.
 
 9. Next catalyst plan
 Next event: ${nextName}.
 Date/time: ${nextDate} ${nextTime}.
-Before: monitor incoming labor expectations, USD, nominal yields, and real yields without inventing forecast values.
-After: compare actual event outcome and market reaction in USD/yields/gold, then store replay evidence.
+Before: monitor incoming labor expectations, USD, nominal yields, real yields, and whether technical context remains usable.
+After: compare actual event outcome and market reaction in USD/yields/gold, then store replay evidence and check whether technical context confirms or contradicts the reaction.
 Avoid-window: ${avoidWindow}.
 
 10. Final research note
-This report remains Wait-Neutral because the evidence base is incomplete and the rejected AI output contained validation failures. Directional bias should remain blocked until macro drivers, event outcomes, replay evidence, and usable technical context improve. <END_GOLDSCOPE_REPORT>
+This report remains Wait-Neutral because the evidence base is incomplete and the rejected AI output contained validation failures. ${techDesc.usable ? "Technical context is available as confirmation context, but directional bias remains blocked until macro drivers, event outcomes, and replay evidence improve." : "Directional bias should remain blocked until macro drivers, event outcomes, replay evidence, and usable technical context improve."} <END_GOLDSCOPE_REPORT>
 
 AI OUTPUT VALIDATION
 ${validationLines}`;
@@ -6374,7 +6450,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.34",
+        appVersion: "GoldScope v2.34.1",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -6743,7 +6819,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.34",
+        appVersion: "GoldScope v2.34.1",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -6777,7 +6853,7 @@ ${err.stack || err.message || String(err)}`);
     return (
       <div style={{ display: "grid", gap: 16 }}>
         <Card>
-          <Title icon="🤖" title="AI Engine - Technical Data Source Repair" sub="Prompt is generated automatically. No manual prompt editing is needed." />
+          <Title icon="🤖" title="AI Engine - Safe Report Technical Awareness" sub="Prompt is generated automatically. No manual prompt editing is needed." />
 
           <Card style={{ background: "#170a12", borderColor: "#7f1d1d", marginBottom: 14 }}>
             <b style={{ color: C.red }}>Important:</b>{" "}
@@ -6858,6 +6934,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Safe report: on</Badge>
               <Badge value="supportive">Technical source repair: on</Badge>
               <Badge value="supportive">XAUUSD first: on</Badge>
+              <Badge value="supportive">Safe technical awareness: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
               <Badge value="supportive">Event validator: on</Badge>
@@ -6865,7 +6942,8 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Validation gate: on</Badge>
               <Badge value="supportive">Safe report: on</Badge>
               <Badge value="supportive">Technical source repair: on</Badge>
-              <Badge value="supportive">XAUUSD first: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
+              <Badge value="supportive">XAUUSD first: on</Badge>
+              <Badge value="supportive">Safe technical awareness: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
 

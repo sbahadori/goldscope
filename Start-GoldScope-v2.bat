@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.34 - Technical Data Source Repair
+title GoldScope v2.34.1 - Safe Report Technical Awareness
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.34 - Technical Data Source Repair
+echo   GoldScope v2.34.1 - Safe Report Technical Awareness
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.
