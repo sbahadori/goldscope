@@ -3533,6 +3533,125 @@ function formatRejectedValidationForDisplay(validation) {
 ${highLines}${suppressedLine}`;
 }
 
+
+function normalizeDebugSnippetText(s) {
+  return String(s || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\t/g, " ")
+    .replace(/[ ]{2,}/g, " ")
+    .trim();
+}
+
+function extractIssueContextSnippet(rawText, patterns, label, maxChars = 340) {
+  const text = String(rawText || "");
+  if (!text.trim()) return null;
+
+  for (const pattern of patterns) {
+    const re = pattern instanceof RegExp ? pattern : new RegExp(String(pattern), "i");
+    const match = re.exec(text);
+    if (!match) continue;
+
+    const idx = match.index;
+    const start = Math.max(0, idx - Math.floor(maxChars / 2));
+    const end = Math.min(text.length, idx + Math.floor(maxChars / 2));
+    let snippet = text.slice(start, end);
+    snippet = normalizeDebugSnippetText(snippet);
+
+    if (start > 0) snippet = `... ${snippet}`;
+    if (end < text.length) snippet = `${snippet} ...`;
+
+    return {
+      label,
+      snippet,
+    };
+  }
+
+  return null;
+}
+
+function buildRejectedRawAiDebugSnippets(rawOutput, sanitizedOutput, validation) {
+  const issues = validation?.issues || [];
+  const highCodes = issues
+    .filter((i) => String(i.severity || "").toLowerCase() === "high")
+    .map((i) => i.code);
+
+  const sourceText = String(rawOutput || "");
+  const sanitizedText = String(sanitizedOutput || "");
+  const snippets = [];
+
+  if (highCodes.some((c) => /rsi|stoch/i.test(c))) {
+    const rsiSnippet = extractIssueContextSnippet(
+      sourceText,
+      [
+        /\bRSI(?:14)?\b[\s\S]{0,120}\b(?:overbought|oversold|extreme|territory|condition|levels?)\b/i,
+        /\b(?:overbought|oversold|extreme)\b[\s\S]{0,120}\bRSI(?:14)?\b/i,
+        /\bStoch(?:astic)?\s*RSI\b[\s\S]{0,140}\b(?:overbought|oversold|extreme)\b/i,
+      ],
+      "RSI issue context"
+    );
+    if (rsiSnippet) snippets.push(rsiSnippet);
+  }
+
+  if (highCodes.some((c) => /nfp|labor|payroll/i.test(c))) {
+    const nfpSnippet = extractIssueContextSnippet(
+      sourceText,
+      [
+        /\bNFP\b[\s\S]{0,180}\b(?:bearish|bullish|fall|rise|yields?|USD|dollar|labor|payroll)\b/i,
+        /\b(?:weak|strong)\s+(?:labor|NFP|payrolls?)\b[\s\S]{0,180}\b(?:bearish|bullish|fall|rise|yields?|USD|dollar)\b/i,
+        /\b(?:falling|rising)\s+(?:yields?|USD|dollar)\b[\s\S]{0,180}\b(?:NFP|labor|payrolls?)\b/i,
+      ],
+      "NFP/labor issue context"
+    );
+    if (nfpSnippet) snippets.push(nfpSnippet);
+  }
+
+  if (highCodes.some((c) => /technical_confirmed|confirmed_evidence/i.test(c))) {
+    const techSnippet = extractIssueContextSnippet(
+      sourceText,
+      [
+        /Confirmed evidence[\s\S]{0,220}\b(?:technical|technicals|EMA|RSI|MACD|ADX|Bollinger|Keltner|strategy modules?)\b/i,
+        /\b(?:technical|technicals|EMA|RSI|MACD|ADX|strategy modules?)\b[\s\S]{0,160}\bconfirmed evidence\b/i,
+      ],
+      "Technical evidence-label issue context"
+    );
+    if (techSnippet) snippets.push(techSnippet);
+  }
+
+  // If sanitizer changed text, include a very short sanitized-output reference around RSI/technical only.
+  if (sanitizedText && sanitizedText !== sourceText && snippets.length < 3) {
+    const sanitizedSnippet = extractIssueContextSnippet(
+      sanitizedText,
+      [
+        /Technical confirmation context[\s\S]{0,180}\b(?:technical|EMA|RSI|MACD|ADX|strategy|Stochastic)\b/i,
+        /RSI14 is not at a classic extreme[\s\S]{0,120}Stochastic RSI/i,
+      ],
+      "Post-sanitizer technical wording context"
+    );
+    if (sanitizedSnippet) snippets.push(sanitizedSnippet);
+  }
+
+  const unique = [];
+  const seen = new Set();
+  for (const s of snippets) {
+    const key = `${s.label}:${s.snippet}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(s);
+    }
+  }
+
+  if (!unique.length) return "";
+
+  return `
+
+RAW AI DEBUG SNIPPETS
+These snippets are from the rejected raw AI output and are shown only to diagnose validator patterns. They are not part of the safe report.
+
+${unique.slice(0, 4).map((s) => `${s.label}:
+"${s.snippet}"`).join("\n\n")}`;
+}
+
+
 function buildValidationSafeGoldReport(snapshot, validation) {
   const nextMajor = getNextMajorEvent(snapshot) || {};
   const flags = snapshot?.contextQualityFlags || {};
@@ -3552,6 +3671,13 @@ function buildValidationSafeGoldReport(snapshot, validation) {
   const nextDate = safeValue(nextMajor.date, "missing date");
   const nextTime = safeValue(nextMajor.time, "missing time");
   const avoidWindow = safeValue(nextMajor.avoidWindow, "missing avoid-window");
+  const macroGateHints = snapshot?.macroGateLanguageHints || buildMacroGateLanguageHints();
+  const deterministicMacroGates = [
+    macroGateHints.nfpWeakYieldUsdDown || "If NFP materially weakens labor expectations and yields/USD fall, then gold may rise.",
+    macroGateHints.nfpStrongYieldUsdUp || "If NFP strengthens labor expectations and yields/USD rise, then gold may fall.",
+    macroGateHints.cpiHotRealYieldsDown || "If CPI is hot but real yields fall, then gold may rise.",
+    macroGateHints.cpiHotRealYieldsUp || "If CPI is hot and real yields rise, then gold may fall.",
+  ];
 
   const validationDisplay = formatRejectedValidationForDisplay(validation);
 
@@ -3599,10 +3725,7 @@ ${techDesc.section}
 Alignment note: ${alignmentText}
 
 8. Decision gates
-- If NFP materially weakens labor expectations and yields/USD fall, then gold may rise.
-- If NFP strengthens labor expectations and yields/USD rise, then gold may fall.
-- If CPI is hot but real yields fall, then gold may rise.
-- If CPI is hot and real yields rise, then gold may fall.
+${deterministicMacroGates.map((gate) => `- ${gate}`).join("\n")}
 - If technical context confirms the post-event macro reaction, confidence may improve within the evidence cap.
 - If technical context contradicts the post-event macro reaction, keep Wait-Neutral.
 
@@ -3783,6 +3906,26 @@ function sanitizeRawAiTechnicalEvidenceLanguage(rawOutput, snapshot) {
     if (out !== before) changes.push(label);
   }
 
+  function replaceClassicRsiExtremeClaim(regex, replacement, label) {
+    const before = out;
+    // Protect Stochastic RSI from classic RSI replacements.
+    const protectedPhrases = [];
+    let protectedOut = out.replace(/\bStoch(?:astic)?\s+RSI(?:14)?\s+(?:is\s+)?(?:overbought|oversold)\b/gi, (m) => {
+      const token = `__GOLDSCOPE_STOCH_RSI_${protectedPhrases.length}__`;
+      protectedPhrases.push([token, m]);
+      return token;
+    });
+
+    protectedOut = protectedOut.replace(regex, replacement);
+
+    for (const [token, original] of protectedPhrases) {
+      protectedOut = protectedOut.replaceAll(token, original);
+    }
+
+    out = protectedOut;
+    if (out !== before) changes.push(label);
+  }
+
   // Scope: technical wording only.
   // Do NOT alter macro decision gates, NFP logic, CPI/yield logic, event outcomes, or scenario labels.
   // 1) Prevent technical-only evidence from being framed as "Confirmed evidence".
@@ -3798,14 +3941,9 @@ function sanitizeRawAiTechnicalEvidenceLanguage(rawOutput, snapshot) {
     "technical_confirmed_evidence_multiline_header"
   );
 
-  // 2) Targeted RSI/StochRSI conflation sanitizer.
-  // Only sanitize definitive RSI extreme claims.
-  // DO NOT sanitize softer language such as:
-  // - RSI is near overbought
-  // - RSI approaches overbought
-  // - RSI is close to overbought
-  // - RSI is below the overbought threshold
-  // These are not definitive false claims and may be valid when RSI is near 70.
+  // 2) Targeted classic RSI/StochRSI conflation sanitizer.
+  // Only sanitize definitive classic RSI extreme claims.
+  // Do NOT modify "Stochastic RSI is overbought/oversold".
   const definitiveRsiExtremePatterns = [
     {
       regex: /\bRSI(?:14)?\s+is\s+overbought\b/gi,
@@ -3850,7 +3988,7 @@ function sanitizeRawAiTechnicalEvidenceLanguage(rawOutput, snapshot) {
   ];
 
   for (const item of definitiveRsiExtremePatterns) {
-    replaceAndTrack(item.regex, phrase, item.label);
+    replaceClassicRsiExtremeClaim(item.regex, phrase, item.label);
   }
 
   // 3) If a line explicitly says technicals are confirmed evidence, downgrade wording.
@@ -3868,10 +4006,223 @@ function sanitizeRawAiTechnicalEvidenceLanguage(rawOutput, snapshot) {
 }
 
 
+
+function containsDefinitiveRsiOverboughtClaim(reportText) {
+  const s = String(reportText || "");
+
+  // Remove Stochastic RSI phrases before testing classic RSI.
+  // This prevents "Stochastic RSI overbought" from being mistaken as "RSI overbought".
+  const classicOnly = s.replace(/\bStoch(?:astic)?\s+RSI(?:14)?\b/gi, "STOCH_RSI_INDICATOR");
+
+  const patterns = [
+    /\bRSI(?:14)?\s+is\s+overbought\b/i,
+    /\bRSI(?:14)?\s+shows\s+overbought\b/i,
+    /\bRSI(?:14)?\s+indicates\s+overbought\b/i,
+    /\bRSI(?:14)?\s+remains\s+overbought\b/i,
+    /\boverbought\s+RSI(?:14)?\b/i,
+  ];
+
+  return patterns.some((p) => p.test(classicOnly));
+}
+
+function containsDefinitiveRsiOversoldClaim(reportText) {
+  const s = String(reportText || "");
+
+  // Remove Stochastic RSI phrases before testing classic RSI.
+  const classicOnly = s.replace(/\bStoch(?:astic)?\s+RSI(?:14)?\b/gi, "STOCH_RSI_INDICATOR");
+
+  const patterns = [
+    /\bRSI(?:14)?\s+is\s+oversold\b/i,
+    /\bRSI(?:14)?\s+shows\s+oversold\b/i,
+    /\bRSI(?:14)?\s+indicates\s+oversold\b/i,
+    /\bRSI(?:14)?\s+remains\s+oversold\b/i,
+    /\boversold\s+RSI(?:14)?\b/i,
+  ];
+
+  return patterns.some((p) => p.test(classicOnly));
+}
+
+
 function validateAiGoldReport(output, snapshot) {
+  const extractDominantScenarioFromReportLocal = (reportText) => {
+    const s = String(reportText || "");
+    const firstSection = s.slice(0, 1400);
+
+    const direct = /Dominant research scenario\s*(?:\n|\r|:|\*\*)+\s*(?:\*\*)?\s*(Bullish|Bearish|Wait[-/ ]?Neutral|Wait\s*\/\s*neutral)/i.exec(firstSection);
+    if (direct) {
+      const v = direct[1].toLowerCase();
+      if (v.includes("bullish")) return "bullish";
+      if (v.includes("bearish")) return "bearish";
+      return "wait-neutral";
+    }
+
+    const bold = /\*\*\s*(Bullish|Bearish|Wait[-/ ]?Neutral|Wait\s*\/\s*neutral)\s*\*\*/i.exec(firstSection);
+    if (bold) {
+      const v = bold[1].toLowerCase();
+      if (v.includes("bullish")) return "bullish";
+      if (v.includes("bearish")) return "bearish";
+      return "wait-neutral";
+    }
+
+    return "unknown";
+  };
+
+  const snapshotRequiresWaitNeutralScenarioLocal = (snap) => {
+    const det = String(snap?.deterministicScenarioLab?.dominant || "").toLowerCase();
+    const replayRecords = Number(snap?.dataReadiness?.replayRecords ?? snap?.replayEvidence?.count ?? 0);
+    const eventQuality = String(snap?.contextQualityFlags?.eventDataCompleteness?.nextMajor?.quality || "").toLowerCase();
+    const missingCritical = snap?.contextQualityFlags?.missingCriticalMacroDrivers || [];
+
+    return (
+      det.includes("wait") &&
+      replayRecords === 0 &&
+      eventQuality === "date-only" &&
+      Array.isArray(missingCritical) &&
+      missingCritical.length > 0
+    );
+  };
+
+  const reportAdmitsDirectionalConfirmationMissingLocal = (reportText) => {
+    const s = String(reportText || "");
+    return /(?:event outcomes?|actual\/forecast|forecast\/actual|replay evidence|replay records?|post-event evidence)[\s\S]{0,120}(?:still required|required|missing|absent|blank|not available|needed|not confirmed)/i.test(s)
+      || /(?:still required|required|missing|absent|blank|not available|needed|not confirmed)[\s\S]{0,120}(?:event outcomes?|actual\/forecast|forecast\/actual|replay evidence|replay records?|post-event evidence)/i.test(s);
+  };
+
+  const collectTechnicalSnapshotNumbersLocal = (snap) => {
+    const tech = snap?.technicalContext || {};
+    const nums = [];
+
+    const add = (n, label) => {
+      const v = Number(n);
+      if (Number.isFinite(v)) nums.push({ value: Number(v.toFixed(2)), label });
+    };
+
+    const tfs = tech.timeframes || {};
+    for (const [tfName, tf] of Object.entries(tfs)) {
+      add(tf?.rsi14, `${tfName}.rsi14`);
+      add(tf?.atr14, `${tfName}.atr14`);
+      add(tf?.ema20, `${tfName}.ema20`);
+      add(tf?.ema50, `${tfName}.ema50`);
+      add(tf?.ema200, `${tfName}.ema200`);
+      add(tf?.lastPrice, `${tfName}.lastPrice`);
+      add(tf?.previousClose, `${tfName}.previousClose`);
+      add(tf?.macd?.macd, `${tfName}.macd`);
+      add(tf?.macd?.signal, `${tfName}.macd.signal`);
+      add(tf?.macd?.histogram, `${tfName}.macd.histogram`);
+      add(tf?.adx14?.adx, `${tfName}.adx`);
+      add(tf?.adx14?.plusDI, `${tfName}.plusDI`);
+      add(tf?.adx14?.minusDI, `${tfName}.minusDI`);
+      add(tf?.stochRsi14?.k, `${tfName}.stochRsiK`);
+      add(tf?.stochRsi14?.d, `${tfName}.stochRsiD`);
+      for (const x of tf?.support || []) add(x, `${tfName}.support`);
+      for (const x of tf?.resistance || []) add(x, `${tfName}.resistance`);
+    }
+
+    add(tech.technicalConfidence, "technicalConfidence");
+    add(tech.dataQuality?.qualityScore, "dataQuality.qualityScore");
+    add(tech.candleCount, "candleCount");
+
+    return nums;
+  };
+
+  const numberApproximatelyMatchesSnapshotLocal = (value, snapshotNumbers) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return true;
+    return snapshotNumbers.some((x) => Math.abs(Number(x.value) - n) <= 0.15);
+  };
+
+  const collectMentionedTechnicalNumericClaimsLocal = (reportText) => {
+    const s = String(reportText || "");
+    const claims = [];
+
+    const patterns = [
+      {
+        label: "RSI14",
+        re: /\bRSI(?:14)?\s*(?:=|:|<|>|<=|>=|is|at|was|reads?)\s*([0-9]{1,4}(?:\.[0-9]+)?)/gi,
+      },
+      {
+        label: "ATR14",
+        re: /\bATR(?:14)?\s*(?:=|:|<|>|<=|>=|is|at|was|reads?)\s*([0-9]{1,5}(?:\.[0-9]+)?)/gi,
+      },
+      {
+        label: "EMA",
+        re: /\bEMA(?:20|50|200)?\s*(?:=|:|<|>|<=|>=|is|at|was|reads?)\s*([0-9]{1,6}(?:\.[0-9]+)?)/gi,
+      },
+      {
+        label: "MACD",
+        re: /\bMACD\s*(?:=|:|<|>|<=|>=|is|at|was|reads?)\s*(-?[0-9]{1,5}(?:\.[0-9]+)?)/gi,
+      },
+      {
+        label: "ADX",
+        re: /\bADX(?:14)?\s*(?:=|:|<|>|<=|>=|is|at|was|reads?)\s*([0-9]{1,4}(?:\.[0-9]+)?)/gi,
+      },
+      {
+        label: "StochRSI",
+        re: /\bStoch(?:astic)?\s*RSI(?:14)?(?:\s*K|\s*D)?\s*(?:=|:|<|>|<=|>=|is|at|was|reads?)\s*([0-9]{1,4}(?:\.[0-9]+)?)/gi,
+      },
+    ];
+
+    for (const item of patterns) {
+      for (const m of s.matchAll(item.re)) {
+        const full = String(m[0] || "");
+        if (/\b(?:below|under|above|over|near|close|approach(?:es|ing)?|threshold|level)\b/i.test(full)) continue;
+        const value = Number(m[1]);
+        if (Number.isFinite(value)) claims.push({ label: item.label, value, text: full });
+      }
+    }
+
+    return claims;
+  };
+
+  const reportUsesDataQualityWarningAsMarketSignalLocal = (reportText) => {
+    const s = String(reportText || "");
+    return /many_invalid_ohlc_removed[\s\S]{0,180}\b(?:volatility|ATR|trend|bearish|bullish|momentum|signal|market|price action|high volatility)\b/i.test(s)
+      || /\b(?:volatility|ATR|trend|bearish|bullish|momentum|signal|market|price action|high volatility)\b[\s\S]{0,180}many_invalid_ohlc_removed/i.test(s);
+  };
+
+
   const issues = [];
   const text = String(output || "");
   const lower = text.toLowerCase();
+
+  // 0) dominant scenario overclaim and technical fact checks
+  const aiDominant = extractDominantScenarioFromReportLocal(text);
+  if (snapshotRequiresWaitNeutralScenarioLocal(snapshot) && (aiDominant === "bullish" || aiDominant === "bearish")) {
+    issues.push({
+      severity: "high",
+      code: "dominant_scenario_overclaim_error",
+      message: "AI selected a directional dominant scenario even though deterministicScenarioLab is Wait/neutral, replayRecords=0, next event data is date-only, and critical macro drivers are missing.",
+    });
+  }
+
+  if ((aiDominant === "bullish" || aiDominant === "bearish") && reportAdmitsDirectionalConfirmationMissingLocal(text)) {
+    issues.push({
+      severity: "high",
+      code: "self_contradictory_directional_scenario_error",
+      message: "AI selected a directional scenario while also stating that event outcomes or replay evidence are still required/missing.",
+    });
+  }
+
+  const snapshotTechNumbers = collectTechnicalSnapshotNumbersLocal(snapshot);
+  const technicalClaims = collectMentionedTechnicalNumericClaimsLocal(text);
+  for (const claim of technicalClaims) {
+    if (!numberApproximatelyMatchesSnapshotLocal(claim.value, snapshotTechNumbers)) {
+      issues.push({
+        severity: "high",
+        code: "technical_numeric_fact_error",
+        message: `AI mentioned a technical numeric value not found in the snapshot: ${claim.label} value ${claim.value} in "${claim.text}".`,
+      });
+      break;
+    }
+  }
+
+  if (reportUsesDataQualityWarningAsMarketSignalLocal(text)) {
+    issues.push({
+      severity: "medium",
+      code: "data_quality_warning_used_as_market_signal",
+      message: "AI appears to treat many_invalid_ohlc_removed as a volatility/trend/market signal. It is a data-quality warning, not market evidence.",
+    });
+  }
 
   // 1) invented numeric thresholds when actual/forecast values are blank
   const hasBlankEventForecasts = !snapshot?.deterministicScenarioLab?.nextMajor?.forecast && !snapshot?.deterministicScenarioLab?.nextMajor?.actual;
@@ -4145,7 +4496,7 @@ function validateAiGoldReport(output, snapshot) {
   const hasRsiAbove70 = rsiValues.some((x) => x > 70);
   const hasRsiBelow30 = rsiValues.some((x) => x < 30);
 
-  if (/\bRSI(?:14)?\b[\s\S]{0,80}\boverbought\b|\boverbought\b[\s\S]{0,80}\bRSI(?:14)?\b/i.test(text) && !hasRsiAbove70) {
+  if (containsDefinitiveRsiOverboughtClaim(text) && !hasRsiAbove70) {
     issues.push({
       severity: "high",
       code: "rsi_overbought_fact_error",
@@ -4153,7 +4504,7 @@ function validateAiGoldReport(output, snapshot) {
     });
   }
 
-  if (/\bRSI(?:14)?\b[\s\S]{0,80}\boversold\b|\boversold\b[\s\S]{0,80}\bRSI(?:14)?\b/i.test(text) && !hasRsiBelow30) {
+  if (containsDefinitiveRsiOversoldClaim(text) && !hasRsiBelow30) {
     issues.push({
       severity: "high",
       code: "rsi_oversold_fact_error",
@@ -8248,7 +8599,19 @@ ${err.message}`);
       }
     }
 
-    function buildGoldScopeContextSnapshot() {
+    
+    function buildMacroGateLanguageHints() {
+      return {
+        available: true,
+        nfpWeakYieldUsdDown: "If NFP materially weakens labor expectations and yields/USD fall, then gold may rise.",
+        nfpStrongYieldUsdUp: "If NFP strengthens labor expectations and yields/USD rise, then gold may fall.",
+        cpiHotRealYieldsDown: "If CPI is hot but real yields fall, then gold may rise.",
+        cpiHotRealYieldsUp: "If CPI is hot and real yields rise, then gold may fall.",
+        instruction: "When macroGateLanguageHints exists, copy these gates exactly in the Decision gates section.",
+      };
+    }
+
+function buildGoldScopeContextSnapshot() {
       const scenario = buildScenarioModel();
       const fredCompact = compactFredRows();
       const replayCompact = compactReplay();
@@ -8257,7 +8620,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.40.9.2",
+        appVersion: "GoldScope v2.40.13.1.2",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -8277,6 +8640,7 @@ ${err.message}`);
         replayEvidence: replayCompact,
         technicalContext: maskTechnicalContextForPrompt(technicalContext),
         alignmentContext: buildAlignmentContextForSnapshot(scenario.macroDirection, maskTechnicalContextForPrompt(technicalContext)),
+        macroGateLanguageHints: buildMacroGateLanguageHints(),
         sourceHealth: normalizeSourceHealth(health),
         contextQualityFlags: applySourceHealthConservatism(qualityFlags, normalizeSourceHealth(health)),
         dataReadiness: {
@@ -8352,6 +8716,7 @@ STRICT SOURCE RULES:
 28. If technicalLanguageHints.requiredPhrase exists, copy it exactly in the Technical confirmation section. Do not paraphrase it.
 29. Technical context must never be written under "Confirmed evidence"; use "Technical confirmation context" instead.
 30. Do not write definitive RSI extreme claims unless supported by RSI14 values. Soft wording such as "near overbought" must not be converted into a definitive extreme claim.
+31. When macroGateLanguageHints exists, copy these gates exactly in the Decision gates section. Do not paraphrase them, invert them, or convert weak-labor/falling-yields into bearish language.
 25. If replayEvidence.count > 0, summarize latest and recent replay reaction patterns. Treat replay as evidence only when qualityScore is adequate and event context is comparable.
 
 MACRO LOGIC GUARD:
@@ -8397,6 +8762,7 @@ Before finalizing, check your own answer for these mistakes:
 - If Stochastic RSI is oversold but RSI14 is not below 30, write that Stochastic RSI shows short-term exhaustion while RSI14 is not at a classic oversold extreme.
 - Do not place technical context under Confirmed evidence. Technicals are confirmation/contradiction context only.
 - The Next catalyst plan must use deterministicScenarioLab.nextMajor/calendar.nextMajor exactly. Do not replace it with a later FOMC/CPI/PCE event.
+- The Decision gates section must copy macroGateLanguageHints exactly when present.
 
 TASK:
 ${modeGuide}
@@ -8462,12 +8828,12 @@ Use this table. In the News row, explicitly mention contextQualityFlags.newsStre
 
 8. Decision gates
 Give 4-6 concrete gates.
+If macroGateLanguageHints exists, copy these four gates exactly before adding any extra gate:
+- If NFP materially weakens labor expectations and yields/USD fall, then gold may rise.
+- If NFP strengthens labor expectations and yields/USD rise, then gold may fall.
+- If CPI is hot but real yields fall, then gold may rise.
+- If CPI is hot and real yields rise, then gold may fall.
 Do not invent numeric thresholds.
-Use conditional wording:
-- If NFP materially weakens labor expectations and yields/USD fall, then...
-- If NFP strengthens labor expectations and yields/USD rise, then...
-- If CPI is hot but real yields fall, then...
-- If CPI is hot and real yields rise, then...
 
 9. Next catalyst plan
 - Next event to watch. Use the exact nextMajor event from the snapshot.
@@ -8595,7 +8961,8 @@ ${JSON.stringify(data, null, 2)}`);
 
             if (highSeverity) {
               const safeReport = buildValidationSafeGoldReport(snapshotForValidation, validation);
-              setAiOutput(safeReport);
+              const debugSnippets = buildRejectedRawAiDebugSnippets(out, outputForValidation, validation);
+              setAiOutput(`${safeReport}${debugSnippets}`);
               setAiStatus("AI rejected: safe report generated");
             } else {
               const sanitizerNote = sanitized.applied
@@ -8653,7 +9020,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.9.2",
+        appVersion: "GoldScope v2.40.13.1.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -8792,6 +9159,12 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Precomputed RSI/StochRSI hint: on</Badge>
               <Badge value="supportive">Raw AI technical sanitizer: on</Badge>
               <Badge value="supportive">Targeted RSI extreme sanitizer: on</Badge>
+              <Badge value="supportive">Rejected raw AI debug snippets: on</Badge>
+              <Badge value="supportive">RSI validator scoped: on</Badge>
+              <Badge value="supportive">RSI helper scope hotfix: on</Badge>
+              <Badge value="supportive">Macro gate hints: on</Badge>
+              <Badge value="supportive">Dominant overclaim validator: on</Badge>
+              <Badge value="supportive">Dominant validator scope hotfix: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -8808,6 +9181,12 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Required RSI phrase: on</Badge>
               <Badge value="supportive">Technical confirmed-evidence sanitizer: on</Badge>
               <Badge value="supportive">near/approaching RSI untouched: on</Badge>
+              <Badge value="supportive">Short issue-context snippets: on</Badge>
+              <Badge value="supportive">StochRSI sanitizer guard: on</Badge>
+              <Badge value="supportive">Validator helper functions global: on</Badge>
+              <Badge value="supportive">Deterministic decision gates: on</Badge>
+              <Badge value="supportive">Technical numeric fact validator: on</Badge>
+              <Badge value="supportive">Validator local helpers: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
@@ -8842,6 +9221,12 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Precomputed RSI/StochRSI hint: on</Badge>
               <Badge value="supportive">Raw AI technical sanitizer: on</Badge>
               <Badge value="supportive">Targeted RSI extreme sanitizer: on</Badge>
+              <Badge value="supportive">Rejected raw AI debug snippets: on</Badge>
+              <Badge value="supportive">RSI validator scoped: on</Badge>
+              <Badge value="supportive">RSI helper scope hotfix: on</Badge>
+              <Badge value="supportive">Macro gate hints: on</Badge>
+              <Badge value="supportive">Dominant overclaim validator: on</Badge>
+              <Badge value="supportive">Dominant validator scope hotfix: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -8858,6 +9243,12 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Required RSI phrase: on</Badge>
               <Badge value="supportive">Technical confirmed-evidence sanitizer: on</Badge>
               <Badge value="supportive">near/approaching RSI untouched: on</Badge>
+              <Badge value="supportive">Short issue-context snippets: on</Badge>
+              <Badge value="supportive">StochRSI sanitizer guard: on</Badge>
+              <Badge value="supportive">Validator helper functions global: on</Badge>
+              <Badge value="supportive">Deterministic decision gates: on</Badge>
+              <Badge value="supportive">Technical numeric fact validator: on</Badge>
+              <Badge value="supportive">Validator local helpers: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
@@ -8944,7 +9335,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.9.2",
+        appVersion: "GoldScope v2.40.13.1.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -9147,7 +9538,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.9.2",
+        appVersion: "GoldScope v2.40.13.1.2",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -9441,7 +9832,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.40.9.2</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.40.13.1.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>

@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.40.9 - Targeted RSI Extreme Claim Sanitizer
+title GoldScope v2.40.13.1 - Dominant Validator Helper Scope Hotfix
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.40.9 - Targeted RSI Extreme Claim Sanitizer
+echo   GoldScope v2.40.13.1 - Dominant Validator Helper Scope Hotfix
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.
