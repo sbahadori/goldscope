@@ -2309,6 +2309,8 @@ function scoreTechnicalTimeframe(tf) {
   if (momentum.includes("negative")) s -= 1;
   if (px === "above") s += 1;
   if (px === "below") s -= 1;
+  const expanded = Number(tf.expandedIndicatorScore);
+  if (Number.isFinite(expanded)) s += Math.max(-2, Math.min(2, expanded));
   return s;
 }
 
@@ -2391,6 +2393,207 @@ function buildAlignmentContextForSnapshot(macroDirection, technicalContext) {
 }
 
 
+
+
+function stddev(values, period) {
+  const arr = (values || []).filter((x) => Number.isFinite(x));
+  if (arr.length < period) return NaN;
+  const slice = arr.slice(-period);
+  const mean = slice.reduce((a, b) => a + b, 0) / period;
+  const variance = slice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / period;
+  return Math.sqrt(variance);
+}
+
+function emaSeries(values, period) {
+  const arr = (values || []).map(Number).filter((x) => Number.isFinite(x));
+  if (arr.length < period) return [];
+  const k = 2 / (period + 1);
+  const out = [];
+  let prev = arr.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  out.push(prev);
+  for (let i = period; i < arr.length; i += 1) {
+    prev = arr[i] * k + prev * (1 - k);
+    out.push(prev);
+  }
+  return out;
+}
+
+function computeMacd(values, fast = 12, slow = 26, signalPeriod = 9) {
+  const arr = (values || []).map(Number).filter((x) => Number.isFinite(x));
+  if (arr.length < slow + signalPeriod) {
+    return { macd: NaN, signal: NaN, histogram: NaN, state: "unavailable" };
+  }
+  const fastSeries = emaSeries(arr, fast);
+  const slowSeries = emaSeries(arr, slow);
+  const minLen = Math.min(fastSeries.length, slowSeries.length);
+  const alignedFast = fastSeries.slice(fastSeries.length - minLen);
+  const alignedSlow = slowSeries.slice(slowSeries.length - minLen);
+  const macdLine = alignedFast.map((x, i) => x - alignedSlow[i]);
+  const signalSeries = emaSeries(macdLine, signalPeriod);
+  if (!signalSeries.length) return { macd: NaN, signal: NaN, histogram: NaN, state: "unavailable" };
+  const macdValue = macdLine[macdLine.length - 1];
+  const signalValue = signalSeries[signalSeries.length - 1];
+  const histogram = macdValue - signalValue;
+  let state = "neutral";
+  if (macdValue > signalValue && histogram > 0) state = "bullish";
+  if (macdValue < signalValue && histogram < 0) state = "bearish";
+  return { macd: macdValue, signal: signalValue, histogram, state };
+}
+
+function computeBollinger(values, period = 20, mult = 2) {
+  const middle = sma(values, period);
+  const sd = stddev(values, period);
+  const price = values?.[values.length - 1];
+  if (!Number.isFinite(middle) || !Number.isFinite(sd) || !Number.isFinite(price)) {
+    return { middle: NaN, upper: NaN, lower: NaN, bandwidthPct: NaN, position: "unavailable" };
+  }
+  const upper = middle + mult * sd;
+  const lower = middle - mult * sd;
+  const bandwidthPct = ((upper - lower) / Math.max(Math.abs(middle), 1)) * 100;
+  let position = "inside";
+  if (price > upper) position = "above_upper";
+  if (price < lower) position = "below_lower";
+  return { middle, upper, lower, bandwidthPct, position };
+}
+
+function computeTrueRanges(candles) {
+  const c = candles || [];
+  const trs = [];
+  for (let i = 1; i < c.length; i += 1) {
+    const high = c[i].high;
+    const low = c[i].low;
+    const prevClose = c[i - 1].close;
+    if (![high, low, prevClose].every(Number.isFinite)) continue;
+    trs.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
+  }
+  return trs;
+}
+
+function computeKeltner(candles, period = 20, mult = 2) {
+  const closes = (candles || []).map((x) => x.close).filter(Number.isFinite);
+  const middle = ema(closes, period);
+  const atrValue = atr(candles, period);
+  const price = closes[closes.length - 1];
+  if (!Number.isFinite(middle) || !Number.isFinite(atrValue) || !Number.isFinite(price)) {
+    return { middle: NaN, upper: NaN, lower: NaN, widthPct: NaN, position: "unavailable" };
+  }
+  const upper = middle + mult * atrValue;
+  const lower = middle - mult * atrValue;
+  const widthPct = ((upper - lower) / Math.max(Math.abs(middle), 1)) * 100;
+  let position = "inside";
+  if (price > upper) position = "above_upper";
+  if (price < lower) position = "below_lower";
+  return { middle, upper, lower, widthPct, position };
+}
+
+function computeAdx(candles, period = 14) {
+  const c = candles || [];
+  if (c.length < period * 2 + 1) {
+    return { adx: NaN, plusDI: NaN, minusDI: NaN, trendStrength: "unavailable", direction: "unavailable" };
+  }
+  const trs = [];
+  const plusDM = [];
+  const minusDM = [];
+
+  for (let i = 1; i < c.length; i += 1) {
+    const upMove = c[i].high - c[i - 1].high;
+    const downMove = c[i - 1].low - c[i].low;
+    const tr = Math.max(
+      c[i].high - c[i].low,
+      Math.abs(c[i].high - c[i - 1].close),
+      Math.abs(c[i].low - c[i - 1].close)
+    );
+    trs.push(tr);
+    plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
+  }
+
+  const dx = [];
+  for (let i = period - 1; i < trs.length; i += 1) {
+    const trSum = trs.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
+    const plusSum = plusDM.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
+    const minusSum = minusDM.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
+    if (trSum <= 0) continue;
+    const plusDI = 100 * plusSum / trSum;
+    const minusDI = 100 * minusSum / trSum;
+    const denom = plusDI + minusDI;
+    if (denom <= 0) continue;
+    dx.push(100 * Math.abs(plusDI - minusDI) / denom);
+  }
+
+  const adxValue = sma(dx, period);
+  const lastTrSum = trs.slice(-period).reduce((a, b) => a + b, 0);
+  const lastPlus = plusDM.slice(-period).reduce((a, b) => a + b, 0);
+  const lastMinus = minusDM.slice(-period).reduce((a, b) => a + b, 0);
+  const plusDI = lastTrSum > 0 ? 100 * lastPlus / lastTrSum : NaN;
+  const minusDI = lastTrSum > 0 ? 100 * lastMinus / lastTrSum : NaN;
+  let trendStrength = "weak";
+  if (adxValue >= 25) trendStrength = "strong";
+  else if (adxValue >= 20) trendStrength = "developing";
+  const direction = plusDI > minusDI ? "bullish" : minusDI > plusDI ? "bearish" : "neutral";
+  return { adx: adxValue, plusDI, minusDI, trendStrength, direction };
+}
+
+function rsiSeries(values, period = 14) {
+  const arr = (values || []).map(Number).filter(Number.isFinite);
+  if (arr.length < period + 1) return [];
+  const out = [];
+  for (let i = period; i < arr.length; i += 1) {
+    const window = arr.slice(i - period, i + 1);
+    out.push(rsi(window, period));
+  }
+  return out.filter(Number.isFinite);
+}
+
+function computeStochRsi(values, rsiPeriod = 14, stochPeriod = 14, smooth = 3) {
+  const rsis = rsiSeries(values, rsiPeriod);
+  if (rsis.length < stochPeriod) {
+    return { k: NaN, d: NaN, state: "unavailable" };
+  }
+  const window = rsis.slice(-stochPeriod);
+  const minRsi = Math.min(...window);
+  const maxRsi = Math.max(...window);
+  const lastRsi = rsis[rsis.length - 1];
+  if (Math.abs(maxRsi - minRsi) < 1e-9) return { k: 50, d: 50, state: "neutral" };
+  const rawK = 100 * (lastRsi - minRsi) / (maxRsi - minRsi);
+
+  const kValues = [];
+  for (let i = stochPeriod - 1; i < rsis.length; i += 1) {
+    const w = rsis.slice(i - stochPeriod + 1, i + 1);
+    const mn = Math.min(...w);
+    const mx = Math.max(...w);
+    kValues.push(Math.abs(mx - mn) < 1e-9 ? 50 : 100 * (rsis[i] - mn) / (mx - mn));
+  }
+  const d = sma(kValues, smooth);
+  let state = "neutral";
+  if (rawK >= 80) state = "overbought";
+  if (rawK <= 20) state = "oversold";
+  if (rawK > d && rawK > 50 && state === "neutral") state = "bullish_momentum";
+  if (rawK < d && rawK < 50 && state === "neutral") state = "bearish_momentum";
+  return { k: rawK, d, state };
+}
+
+function expandedIndicatorSignalScore({ macd, adxValue, bollinger, keltner, stochRsiValue }) {
+  let s = 0;
+  if (macd?.state === "bullish") s += 1;
+  if (macd?.state === "bearish") s -= 1;
+
+  if (adxValue?.trendStrength === "strong" || adxValue?.trendStrength === "developing") {
+    if (adxValue.direction === "bullish") s += 1;
+    if (adxValue.direction === "bearish") s -= 1;
+  }
+
+  if (bollinger?.position === "above_upper") s += 0.5;
+  if (bollinger?.position === "below_lower") s -= 0.5;
+  if (keltner?.position === "above_upper") s += 0.5;
+  if (keltner?.position === "below_lower") s -= 0.5;
+
+  if (stochRsiValue?.state === "bullish_momentum") s += 0.5;
+  if (stochRsiValue?.state === "bearish_momentum") s -= 0.5;
+  return s;
+}
+
+
 function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timeframe = "1h", sourceName = "yahoo") {
   const cleaned = sanitizeCandles(candles, symbol);
   const c = cleaned.candles;
@@ -2432,6 +2635,11 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
   const ema200 = ema(closes, 200);
   const rsi14 = rsi(closes, 14);
   const atr14 = atr(c, 14);
+  const macd = computeMacd(closes, 12, 26, 9);
+  const adx14 = computeAdx(c, 14);
+  const bollinger20 = computeBollinger(closes, 20, 2);
+  const keltner20 = computeKeltner(c, 20, 2);
+  const stochRsi14 = computeStochRsi(closes, 14, 14, 3);
   const { support, resistance } = estimateSupportResistance(c, 60);
   const trend = classifyTrend(price, ema20, ema50, ema200);
   const momentum = classifyMomentum(rsi14, price, prevPrice);
@@ -2447,6 +2655,15 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
   if (momentum.includes("negative")) score -= 1;
   if (priceVsEMA200 === "above") score += 1;
   if (priceVsEMA200 === "below") score -= 1;
+
+  const expandedScore = expandedIndicatorSignalScore({
+    macd,
+    adxValue: adx14,
+    bollinger: bollinger20,
+    keltner: keltner20,
+    stochRsiValue: stochRsi14,
+  });
+  score += expandedScore;
 
   if (score >= 3) bias = "bullish";
   else if (score <= -3) bias = "bearish";
@@ -2473,6 +2690,9 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
     if (d > 0.50) sanityIssues.push("ema200_far_from_price");
   }
   if (rsi14 === 100 || rsi14 === 0) sanityIssues.push("rsi_extreme_possible_bad_data_or_overextension");
+  if (Number.isFinite(stochRsi14?.k) && (stochRsi14.k === 100 || stochRsi14.k === 0)) {
+    sanityIssues.push("stoch_rsi_extreme_possible_overextension");
+  }
   if (Number.isFinite(atr14) && Number.isFinite(price) && atr14 / Math.max(Math.abs(price), 1) > 0.05) {
     sanityIssues.push("atr_unusually_large_relative_to_price");
   }
@@ -2515,6 +2735,39 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
         ema200: round2(ema200),
         rsi14: round2(rsi14),
         atr14: round2(atr14),
+        macd: {
+          macd: round2(macd.macd),
+          signal: round2(macd.signal),
+          histogram: round2(macd.histogram),
+          state: macd.state,
+        },
+        adx14: {
+          adx: round2(adx14.adx),
+          plusDI: round2(adx14.plusDI),
+          minusDI: round2(adx14.minusDI),
+          trendStrength: adx14.trendStrength,
+          direction: adx14.direction,
+        },
+        bollinger20: {
+          middle: round2(bollinger20.middle),
+          upper: round2(bollinger20.upper),
+          lower: round2(bollinger20.lower),
+          bandwidthPct: round2(bollinger20.bandwidthPct),
+          position: bollinger20.position,
+        },
+        keltner20: {
+          middle: round2(keltner20.middle),
+          upper: round2(keltner20.upper),
+          lower: round2(keltner20.lower),
+          widthPct: round2(keltner20.widthPct),
+          position: keltner20.position,
+        },
+        stochRsi14: {
+          k: round2(stochRsi14.k),
+          d: round2(stochRsi14.d),
+          state: stochRsi14.state,
+        },
+        expandedIndicatorScore: round2(expandedScore),
         trend,
         momentum,
         priceVsEMA200,
@@ -2522,6 +2775,12 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
         resistance: resistance.filter((x) => Number.isFinite(x) && x > 0),
         structure: trend === "neutral/range" ? "range/unclear" : trend,
       },
+    },
+    technicalIndicators: {
+      available: true,
+      set: ["MACD(12,26,9)", "ADX(14)", "Bollinger(20,2)", "Keltner(20,2)", "Stochastic RSI(14,14,3)"],
+      indicatorScore: round2(expandedScore),
+      note: "Expanded indicators are confirmation/contradiction context only and must not override macro/event/replay evidence.",
     },
     technicalBias: bias,
     technicalConfidence,
@@ -2771,6 +3030,12 @@ function describeTechnicalForSafeReport(tech) {
   const ema20 = tf.ema20 ?? "unknown";
   const ema50 = tf.ema50 ?? "unknown";
   const ema200 = tf.ema200 ?? "unknown";
+  const macdText = tf.macd ? `MACD=${tf.macd.macd}/${tf.macd.signal}/hist ${tf.macd.histogram} (${tf.macd.state})` : "MACD=not available";
+  const adxText = tf.adx14 ? `ADX14=${tf.adx14.adx}, +DI=${tf.adx14.plusDI}, -DI=${tf.adx14.minusDI}, strength=${tf.adx14.trendStrength}, direction=${tf.adx14.direction}` : "ADX14=not available";
+  const bollingerText = tf.bollinger20 ? `Bollinger20 position=${tf.bollinger20.position}, upper=${tf.bollinger20.upper}, middle=${tf.bollinger20.middle}, lower=${tf.bollinger20.lower}, bandwidth=${tf.bollinger20.bandwidthPct}%` : "Bollinger20=not available";
+  const keltnerText = tf.keltner20 ? `Keltner20 position=${tf.keltner20.position}, upper=${tf.keltner20.upper}, middle=${tf.keltner20.middle}, lower=${tf.keltner20.lower}, width=${tf.keltner20.widthPct}%` : "Keltner20=not available";
+  const stochRsiText = tf.stochRsi14 ? `StochRSI14 K=${tf.stochRsi14.k}, D=${tf.stochRsi14.d}, state=${tf.stochRsi14.state}` : "StochRSI14=not available";
+  const expandedScoreText = tf.expandedIndicatorScore ?? "unknown";
   const support = Array.isArray(tf.support) && tf.support.length ? tf.support.join(", ") : "not available";
   const resistance = Array.isArray(tf.resistance) && tf.resistance.length ? tf.resistance.join(", ") : "not available";
   const qLabel = tech.dataQuality?.qualityLabel || tech.reliability || "unknown";
@@ -2778,12 +3043,12 @@ function describeTechnicalForSafeReport(tech) {
   const mtfText = tech.multiTimeframe ? ` Multi-timeframe: bias=${tech.multiTimeframe.bias}, score=${tech.multiTimeframe.score}, conflicts=${(tech.multiTimeframe.conflicts || []).join(", ") || "none"}.` : "";
 
   return {
-    summary: `Technical context is usable as confirmation context only: ${bias} bias, confidence ${conf}, source ${sourceText}, quality ${qLabel}/${qScore}.${mtfText}`,
-    evidenceRowState: `${bias} bias; trend=${trend}; momentum=${momentum}; priceVsEMA200=${priceVs}; source=${sourceText}`,
+    summary: `Technical context is usable as confirmation context only: ${bias} bias, confidence ${conf}, source ${sourceText}, quality ${qLabel}/${qScore}. Expanded indicators: ${macdText}; ${adxText}; ${stochRsiText}.${mtfText}`,
+    evidenceRowState: `${bias} bias; trend=${trend}; momentum=${momentum}; priceVsEMA200=${priceVs}; MACD=${tf.macd?.state || "unknown"}; ADX=${tf.adx14?.trendStrength || "unknown"}; StochRSI=${tf.stochRsi14?.state || "unknown"}; source=${sourceText}`,
     implication: `${bias} technical confirmation context; must not override incomplete macro/event evidence`,
     reliability: qLabel,
     usable: true,
-    section: `Technical context is available and usable only as confirmation context, not as a macro override. Selected source: ${sourceText}. Data quality: ${qLabel} with score ${qScore}. Technical bias: ${bias} with confidence ${conf}. On ${tfKey || "selected timeframe"}, trend=${trend}, momentum=${momentum}, priceVsEMA200=${priceVs}, RSI14=${rsi}, ATR14=${atr}, EMA20=${ema20}, EMA50=${ema50}, EMA200=${ema200}, support=${support}, resistance=${resistance}. This can confirm, weaken, or contradict macro context, but it cannot override missing FRED drivers, blank event actual/forecast values, or absent replay evidence.${mtfText}`,
+    section: `Technical context is available and usable only as confirmation context, not as a macro override. Selected source: ${sourceText}. Data quality: ${qLabel} with score ${qScore}. Technical bias: ${bias} with confidence ${conf}. On ${tfKey || "selected timeframe"}, trend=${trend}, momentum=${momentum}, priceVsEMA200=${priceVs}, RSI14=${rsi}, ATR14=${atr}, EMA20=${ema20}, EMA50=${ema50}, EMA200=${ema200}. Expanded indicators: ${macdText}; ${adxText}; ${bollingerText}; ${keltnerText}; ${stochRsiText}; expandedIndicatorScore=${expandedScoreText}. Support=${support}; resistance=${resistance}. This can confirm, weaken, or contradict macro context, but it cannot override missing FRED drivers, blank event actual/forecast values, or absent replay evidence.${mtfText}`,
     alignment: bias,
   };
 }
@@ -2916,6 +3181,14 @@ REJECTED AI OUTPUT VALIDATION
 ${validationLines}`;
 }
 
+
+
+function collectTechnicalStochRsiValues(snapshot) {
+  const tfs = snapshot?.technicalContext?.timeframes || {};
+  return Object.values(tfs)
+    .map((tf) => Number(tf?.stochRsi14?.k))
+    .filter((x) => Number.isFinite(x));
+}
 
 function collectTechnicalRsiValues(snapshot) {
   const tfs = snapshot?.technicalContext?.timeframes || {};
@@ -3264,6 +3537,29 @@ function validateAiGoldReport(output, snapshot) {
       message: `AI described RSI as oversold, but no technical RSI value is below 30. RSI values: ${rsiValues.join(", ") || "none"}.`,
     });
   }
+
+
+  // 14b) Stochastic RSI fact validator
+  const stochRsiValues = collectTechnicalStochRsiValues(snapshot);
+  const hasStochAbove80 = stochRsiValues.some((x) => x >= 80);
+  const hasStochBelow20 = stochRsiValues.some((x) => x <= 20);
+
+  if (/stoch(?:astic)?\s*RSI[\s\S]{0,80}\boverbought\b|\boverbought\b[\s\S]{0,80}stoch(?:astic)?\s*RSI/i.test(text) && !hasStochAbove80) {
+    issues.push({
+      severity: "high",
+      code: "stoch_rsi_overbought_fact_error",
+      message: `AI described Stochastic RSI as overbought, but no StochRSI K value is >= 80. K values: ${stochRsiValues.join(", ") || "none"}.`,
+    });
+  }
+
+  if (/stoch(?:astic)?\s*RSI[\s\S]{0,80}\boversold\b|\boversold\b[\s\S]{0,80}stoch(?:astic)?\s*RSI/i.test(text) && !hasStochBelow20) {
+    issues.push({
+      severity: "high",
+      code: "stoch_rsi_oversold_fact_error",
+      message: `AI described Stochastic RSI as oversold, but no StochRSI K value is <= 20. K values: ${stochRsiValues.join(", ") || "none"}.`,
+    });
+  }
+
 
   // 15) Technical context must not be treated as confirmed evidence
   if (reportMentionsTechnicalConfirmedEvidence(text)) {
@@ -7293,7 +7589,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.38",
+        appVersion: "GoldScope v2.39",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -7379,6 +7675,8 @@ STRICT SOURCE RULES:
 22. If technicalContext.sourceSelection exists, you may summarize source quality and selected symbol, but do not treat failed/weak sources as evidence.
 23. If technicalContext.multiTimeframe exists, summarize cross-timeframe agreement or conflict.
 24. If alignmentContext exists, use it as the final macro/technical alignment rule; it can confirm, weaken, or contradict, but cannot override missing macro/event/replay evidence.
+25. If technicalContext contains expanded indicators, summarize MACD, ADX, Bollinger Bands, Keltner Channels, and Stochastic RSI as confirmation context only. Do not call these confirmed macro evidence.
+26. Do not call Stochastic RSI overbought unless K >= 80; do not call it oversold unless K <= 20.
 25. If replayEvidence.count > 0, summarize latest and recent replay reaction patterns. Treat replay as evidence only when qualityScore is adequate and event context is comparable.
 
 MACRO LOGIC GUARD:
@@ -7670,7 +7968,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.38",
+        appVersion: "GoldScope v2.39",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -7797,10 +8095,12 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Replay tab workflow: on</Badge>
               <Badge value="supportive">Manual replay hidden: on</Badge>
               <Badge value="supportive">Simplified operator UX: on</Badge>
+              <Badge value="supportive">MACD/ADX/Bollinger/Keltner/StochRSI: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
               <Badge value="supportive">Simplified nav: on</Badge>
+              <Badge value="supportive">Expanded indicators: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
@@ -7823,10 +8123,12 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Replay tab workflow: on</Badge>
               <Badge value="supportive">Manual replay hidden: on</Badge>
               <Badge value="supportive">Simplified operator UX: on</Badge>
+              <Badge value="supportive">MACD/ADX/Bollinger/Keltner/StochRSI: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
               <Badge value="supportive">Simplified nav: on</Badge>
+              <Badge value="supportive">Expanded indicators: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
@@ -7913,7 +8215,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.38",
+        appVersion: "GoldScope v2.39",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -8116,7 +8418,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.38",
+        appVersion: "GoldScope v2.39",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -8410,14 +8712,14 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.38</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.39</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
               <Badge value={bias.color === C.green ? "bullish" : bias.color === C.red ? "bearish" : "warning"}>{bias.label.replace("Research bias: ", "")}</Badge>
             </div>
             <p style={{ color: C.muted, margin: "7px 0 0", fontSize: 13 }}>
-              XAUUSD research terminal · simplified workflow · macro + technical + replay-aware scenario lab · no broker connection · no auto-trading
+              XAUUSD research terminal · simplified workflow · macro + expanded technical indicators + replay-aware scenario lab · no broker connection · no auto-trading
             </p>
           </div>
           <div className="layout-note" style={{ display: "flex", gap: 8 }}>

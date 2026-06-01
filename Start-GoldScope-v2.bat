@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.38 - Simplified Operator UX
+title GoldScope v2.39 - Technical Indicator Expansion
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.38 - Simplified Operator UX
+echo   GoldScope v2.39 - Technical Indicator Expansion
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.
