@@ -2594,6 +2594,327 @@ function expandedIndicatorSignalScore({ macd, adxValue, bollinger, keltner, stoc
 }
 
 
+
+function strategyScoreLabel(score) {
+  if (score >= 2.5) return "bullish";
+  if (score <= -2.5) return "bearish";
+  if (score > 0.5) return "mild-bullish";
+  if (score < -0.5) return "mild-bearish";
+  return "neutral";
+}
+
+function buildTrendStrategyModule({ price, ema20, ema50, ema200, trend, priceVsEMA200, adx14 }) {
+  let score = 0;
+  const evidence = [];
+
+  if (trend?.includes("bullish")) {
+    score += 2;
+    evidence.push("EMA alignment is bullish.");
+  }
+  if (trend?.includes("bearish")) {
+    score -= 2;
+    evidence.push("EMA alignment is bearish.");
+  }
+  if (priceVsEMA200 === "above") {
+    score += 1;
+    evidence.push("Price is above EMA200.");
+  }
+  if (priceVsEMA200 === "below") {
+    score -= 1;
+    evidence.push("Price is below EMA200.");
+  }
+  if ((adx14?.trendStrength === "strong" || adx14?.trendStrength === "developing") && adx14?.direction === "bullish") {
+    score += 1;
+    evidence.push(`ADX confirms ${adx14.trendStrength} bullish trend pressure.`);
+  }
+  if ((adx14?.trendStrength === "strong" || adx14?.trendStrength === "developing") && adx14?.direction === "bearish") {
+    score -= 1;
+    evidence.push(`ADX confirms ${adx14.trendStrength} bearish trend pressure.`);
+  }
+
+  return {
+    name: "Trend Strategy Module",
+    status: "available",
+    score: round2(score),
+    bias: strategyScoreLabel(score),
+    inputs: {
+      ema20: round2(ema20),
+      ema50: round2(ema50),
+      ema200: round2(ema200),
+      trend,
+      priceVsEMA200,
+      adxTrendStrength: adx14?.trendStrength || "unknown",
+      adxDirection: adx14?.direction || "unknown",
+    },
+    evidence,
+    interpretation: "Trend module combines EMA alignment, price versus EMA200, and ADX direction/strength.",
+    guardrail: "Trend module is confirmation context only and cannot override macro/event/replay evidence.",
+  };
+}
+
+function buildMomentumStrategyModule({ rsi14, macd, stochRsi14, momentum }) {
+  let score = 0;
+  const evidence = [];
+
+  if (momentum?.includes("positive")) {
+    score += 1;
+    evidence.push("Price/RSI momentum is positive.");
+  }
+  if (momentum?.includes("negative")) {
+    score -= 1;
+    evidence.push("Price/RSI momentum is negative.");
+  }
+  if (macd?.state === "bullish") {
+    score += 1;
+    evidence.push("MACD is bullish.");
+  }
+  if (macd?.state === "bearish") {
+    score -= 1;
+    evidence.push("MACD is bearish.");
+  }
+  if (Number.isFinite(rsi14) && rsi14 >= 70) {
+    evidence.push("RSI14 is overbought; treat as overextension risk, not automatic bearish confirmation.");
+  } else if (Number.isFinite(rsi14) && rsi14 <= 30) {
+    evidence.push("RSI14 is oversold; treat as exhaustion risk, not automatic bullish confirmation.");
+  } else if (Number.isFinite(rsi14)) {
+    evidence.push("RSI14 is not at a classic overbought/oversold extreme.");
+  }
+
+  if (stochRsi14?.state === "bullish_momentum") {
+    score += 0.5;
+    evidence.push("Stochastic RSI shows bullish momentum.");
+  }
+  if (stochRsi14?.state === "bearish_momentum") {
+    score -= 0.5;
+    evidence.push("Stochastic RSI shows bearish momentum.");
+  }
+  if (stochRsi14?.state === "overbought") {
+    evidence.push("Stochastic RSI is overbought; this flags short-term overextension risk.");
+  }
+  if (stochRsi14?.state === "oversold") {
+    evidence.push("Stochastic RSI is oversold; this flags short-term exhaustion risk.");
+  }
+
+  return {
+    name: "Momentum Strategy Module",
+    status: "available",
+    score: round2(score),
+    bias: strategyScoreLabel(score),
+    inputs: {
+      rsi14: round2(rsi14),
+      macdState: macd?.state || "unknown",
+      macdHistogram: round2(macd?.histogram),
+      stochRsiK: round2(stochRsi14?.k),
+      stochRsiD: round2(stochRsi14?.d),
+      stochRsiState: stochRsi14?.state || "unknown",
+      momentum,
+    },
+    evidence,
+    interpretation: "Momentum module combines RSI, MACD, and Stochastic RSI for short-term pressure/overextension context.",
+    guardrail: "Momentum module is confirmation context only and cannot override macro/event/replay evidence.",
+  };
+}
+
+function buildVolatilityStrategyModule({ atr14, price, bollinger20, keltner20 }) {
+  let score = 0;
+  const evidence = [];
+  const atrPct = Number.isFinite(atr14) && Number.isFinite(price) && Math.abs(price) > 0
+    ? (atr14 / Math.abs(price)) * 100
+    : NaN;
+
+  if (Number.isFinite(atrPct)) {
+    if (atrPct >= 2) evidence.push("ATR is elevated relative to price; volatility risk is high.");
+    else if (atrPct >= 1) evidence.push("ATR is moderate relative to price.");
+    else evidence.push("ATR is contained relative to price.");
+  }
+
+  if (bollinger20?.position === "above_upper") {
+    score += 0.5;
+    evidence.push("Price is above Bollinger upper band; upside extension/overextension context.");
+  } else if (bollinger20?.position === "below_lower") {
+    score -= 0.5;
+    evidence.push("Price is below Bollinger lower band; downside extension/overextension context.");
+  } else {
+    evidence.push("Price is inside Bollinger Bands.");
+  }
+
+  if (keltner20?.position === "above_upper") {
+    score += 0.5;
+    evidence.push("Price is above Keltner upper channel; volatility breakout context.");
+  } else if (keltner20?.position === "below_lower") {
+    score -= 0.5;
+    evidence.push("Price is below Keltner lower channel; volatility breakdown context.");
+  } else {
+    evidence.push("Price is inside Keltner Channel.");
+  }
+
+  const bbWidth = Number(bollinger20?.bandwidthPct);
+  const kcWidth = Number(keltner20?.widthPct);
+  let regime = "unknown";
+  if (Number.isFinite(bbWidth) && Number.isFinite(kcWidth)) {
+    if (bbWidth < kcWidth) {
+      regime = "compression/squeeze";
+      evidence.push("Bollinger width is below Keltner width; possible compression regime.");
+    } else {
+      regime = "expanded/normal";
+      evidence.push("Bollinger width is not below Keltner width; no squeeze flag.");
+    }
+  }
+
+  return {
+    name: "Volatility Strategy Module",
+    status: "available",
+    score: round2(score),
+    bias: strategyScoreLabel(score),
+    inputs: {
+      atr14: round2(atr14),
+      atrPct: round2(atrPct),
+      bollingerPosition: bollinger20?.position || "unknown",
+      bollingerBandwidthPct: round2(bollinger20?.bandwidthPct),
+      keltnerPosition: keltner20?.position || "unknown",
+      keltnerWidthPct: round2(keltner20?.widthPct),
+      regime,
+    },
+    evidence,
+    interpretation: "Volatility module combines ATR, Bollinger Bands, and Keltner Channels to identify range, expansion, or compression context.",
+    guardrail: "Volatility module is confirmation/risk context only and cannot override macro/event/replay evidence.",
+  };
+}
+
+function buildStructureStrategyModule({ price, support, resistance, trend }) {
+  let score = 0;
+  const evidence = [];
+  const validSupport = (support || []).filter((x) => Number.isFinite(x) && x > 0);
+  const validResistance = (resistance || []).filter((x) => Number.isFinite(x) && x > 0);
+
+  const nearestSupport = validSupport.length
+    ? validSupport.reduce((best, x) => Math.abs(price - x) < Math.abs(price - best) ? x : best, validSupport[0])
+    : null;
+  const nearestResistance = validResistance.length
+    ? validResistance.reduce((best, x) => Math.abs(price - x) < Math.abs(price - best) ? x : best, validResistance[0])
+    : null;
+
+  const supportDistancePct = Number.isFinite(nearestSupport) && Number.isFinite(price)
+    ? ((price - nearestSupport) / Math.max(Math.abs(price), 1)) * 100
+    : NaN;
+  const resistanceDistancePct = Number.isFinite(nearestResistance) && Number.isFinite(price)
+    ? ((nearestResistance - price) / Math.max(Math.abs(price), 1)) * 100
+    : NaN;
+
+  if (trend === "neutral/range") {
+    evidence.push("Trend classifier suggests range/unclear structure.");
+  } else if (trend?.includes("bearish")) {
+    score -= 0.5;
+    evidence.push("Structure inherits bearish trend context.");
+  } else if (trend?.includes("bullish")) {
+    score += 0.5;
+    evidence.push("Structure inherits bullish trend context.");
+  }
+
+  if (Number.isFinite(supportDistancePct)) {
+    evidence.push(`Nearest support distance is ${round2(supportDistancePct)}% from current proxy price.`);
+  }
+  if (Number.isFinite(resistanceDistancePct)) {
+    evidence.push(`Nearest resistance distance is ${round2(resistanceDistancePct)}% from current proxy price.`);
+  }
+
+  let structureRegime = "range/unclear";
+  if (trend?.includes("bearish")) structureRegime = "bearish structure";
+  if (trend?.includes("bullish")) structureRegime = "bullish structure";
+
+  return {
+    name: "Structure Strategy Module",
+    status: "available",
+    score: round2(score),
+    bias: strategyScoreLabel(score),
+    inputs: {
+      structureRegime,
+      support: validSupport.map(round2),
+      resistance: validResistance.map(round2),
+      nearestSupport: round2(nearestSupport),
+      nearestResistance: round2(nearestResistance),
+      supportDistancePct: round2(supportDistancePct),
+      resistanceDistancePct: round2(resistanceDistancePct),
+    },
+    evidence,
+    interpretation: "Structure module summarizes support/resistance proximity and range/trend structure from cleaned proxy candles.",
+    guardrail: "Structure levels come from the selected technical proxy and are not trade instructions.",
+  };
+}
+
+function buildStrategyModules(args) {
+  const trendModule = buildTrendStrategyModule(args);
+  const momentumModule = buildMomentumStrategyModule(args);
+  const volatilityModule = buildVolatilityStrategyModule(args);
+  const structureModule = buildStructureStrategyModule(args);
+  const modules = {
+    trend: trendModule,
+    momentum: momentumModule,
+    volatility: volatilityModule,
+    structure: structureModule,
+  };
+  const aggregateScore = Object.values(modules).reduce((acc, m) => acc + Number(m.score || 0), 0);
+  return {
+    available: true,
+    aggregateScore: round2(aggregateScore),
+    aggregateBias: strategyScoreLabel(aggregateScore),
+    modules,
+    guardrail: "Strategy modules are technical confirmation/contradiction context only and do not override macro/event/replay evidence.",
+  };
+}
+
+
+
+function classifyTechnicalSanityIssues(sanityIssues, cleaned) {
+  const issues = Array.isArray(sanityIssues) ? sanityIssues : [];
+  const qualityScore = Number(cleaned?.qualityScore || 0);
+  const cleanCount = Number(cleaned?.cleanCount || 0);
+
+  const warningOnly = new Set([
+    "stoch_rsi_extreme_possible_overextension",
+    "rsi_extreme_possible_bad_data_or_overextension",
+    "many_invalid_ohlc_removed",
+    "support_unavailable_after_cleaning",
+  ]);
+
+  const hardFailures = new Set([
+    "invalid_support_zero_or_negative",
+    "ema20_far_from_price",
+    "ema50_far_from_price",
+    "ema200_far_from_price",
+    "atr_unusually_large_relative_to_price",
+    "price_series_contains_abnormally_low_candles",
+    "no_valid_candles",
+    "outlier_price_candles_removed",
+    "large_discontinuity_candle_removed",
+    "last_price_far_from_series_median",
+    "wide_price_distribution_possible_bad_history",
+  ]);
+
+  const warnings = [];
+  const failures = [];
+
+  for (const issue of issues) {
+    if (issue === "many_invalid_ohlc_removed" && qualityScore >= 70 && cleanCount >= 200) {
+      warnings.push(issue);
+    } else if (warningOnly.has(issue)) {
+      warnings.push(issue);
+    } else if (hardFailures.has(issue)) {
+      failures.push(issue);
+    } else {
+      // Unknown quality issue is conservative only when source quality is not strong.
+      if (qualityScore >= 75 && cleanCount >= 200) warnings.push(issue);
+      else failures.push(issue);
+    }
+  }
+
+  return {
+    warnings: [...new Set(warnings)],
+    failures: [...new Set(failures)],
+  };
+}
+
+
 function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timeframe = "1h", sourceName = "yahoo") {
   const cleaned = sanitizeCandles(candles, symbol);
   const c = cleaned.candles;
@@ -2647,6 +2968,25 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
     ? price > ema200 ? "above" : price < ema200 ? "below" : "at"
     : "unknown";
 
+  const strategyModules = buildStrategyModules({
+    price,
+    ema20,
+    ema50,
+    ema200,
+    rsi14,
+    atr14,
+    macd,
+    adx14,
+    bollinger20,
+    keltner20,
+    stochRsi14,
+    support,
+    resistance,
+    trend,
+    momentum,
+    priceVsEMA200,
+  });
+
   let bias = "neutral";
   let score = 0;
   if (trend.includes("bullish")) score += 2;
@@ -2664,6 +3004,8 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
     stochRsiValue: stochRsi14,
   });
   score += expandedScore;
+  const strategyScoreContribution = Math.max(-2, Math.min(2, Number(strategyModules.aggregateScore || 0) / 2));
+  score += strategyScoreContribution;
 
   if (score >= 3) bias = "bullish";
   else if (score <= -3) bias = "bearish";
@@ -2700,8 +3042,19 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
     sanityIssues.push("price_series_contains_abnormally_low_candles");
   }
 
-  const technicalReliability = sanityIssues.length ? "unreliable" : "usable";
-  let technicalConfidence = Math.max(20, Math.min(70, 25 + Math.abs(score) * 12 + (c.length >= 200 ? 10 : 0)));
+  for (const sourceIssue of cleaned.issues || []) {
+    if (!sanityIssues.includes(sourceIssue)) sanityIssues.push(sourceIssue);
+  }
+
+  const sanityClassification = classifyTechnicalSanityIssues(sanityIssues, cleaned);
+  const technicalWarnings = sanityClassification.warnings;
+  const technicalFailures = sanityClassification.failures;
+  const technicalReliability = technicalFailures.length ? "unreliable" : "usable";
+  let technicalConfidence = Math.max(20, Math.min(75, 25 + Math.abs(score) * 12 + (c.length >= 200 ? 10 : 0)));
+
+  if (technicalWarnings.length && technicalReliability === "usable") {
+    technicalConfidence = Math.max(20, technicalConfidence - Math.min(10, technicalWarnings.length * 3));
+  }
 
   if (technicalReliability === "unreliable") {
     technicalConfidence = Math.min(20, technicalConfidence);
@@ -2768,6 +3121,8 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
           state: stochRsi14.state,
         },
         expandedIndicatorScore: round2(expandedScore),
+        strategyModules,
+        strategyScoreContribution: round2(strategyScoreContribution),
         trend,
         momentum,
         priceVsEMA200,
@@ -2782,6 +3137,7 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
       indicatorScore: round2(expandedScore),
       note: "Expanded indicators are confirmation/contradiction context only and must not override macro/event/replay evidence.",
     },
+    strategyModules,
     technicalBias: bias,
     technicalConfidence,
     guardrails: [
@@ -3036,6 +3392,11 @@ function describeTechnicalForSafeReport(tech) {
   const keltnerText = tf.keltner20 ? `Keltner20 position=${tf.keltner20.position}, upper=${tf.keltner20.upper}, middle=${tf.keltner20.middle}, lower=${tf.keltner20.lower}, width=${tf.keltner20.widthPct}%` : "Keltner20=not available";
   const stochRsiText = tf.stochRsi14 ? `StochRSI14 K=${tf.stochRsi14.k}, D=${tf.stochRsi14.d}, state=${tf.stochRsi14.state}` : "StochRSI14=not available";
   const expandedScoreText = tf.expandedIndicatorScore ?? "unknown";
+  const strategy = tech.strategyModules || tf.strategyModules || {};
+  const modules = strategy.modules || {};
+  const strategyText = strategy.available
+    ? `Strategy modules: aggregateBias=${strategy.aggregateBias}, aggregateScore=${strategy.aggregateScore}; trend=${modules.trend?.bias || "unknown"}(${modules.trend?.score ?? "?"}), momentum=${modules.momentum?.bias || "unknown"}(${modules.momentum?.score ?? "?"}), volatility=${modules.volatility?.bias || "unknown"}(${modules.volatility?.score ?? "?"}), structure=${modules.structure?.bias || "unknown"}(${modules.structure?.score ?? "?"})`
+    : "Strategy modules=not available";
   const support = Array.isArray(tf.support) && tf.support.length ? tf.support.join(", ") : "not available";
   const resistance = Array.isArray(tf.resistance) && tf.resistance.length ? tf.resistance.join(", ") : "not available";
   const qLabel = tech.dataQuality?.qualityLabel || tech.reliability || "unknown";
@@ -3043,12 +3404,12 @@ function describeTechnicalForSafeReport(tech) {
   const mtfText = tech.multiTimeframe ? ` Multi-timeframe: bias=${tech.multiTimeframe.bias}, score=${tech.multiTimeframe.score}, conflicts=${(tech.multiTimeframe.conflicts || []).join(", ") || "none"}.` : "";
 
   return {
-    summary: `Technical context is usable as confirmation context only: ${bias} bias, confidence ${conf}, source ${sourceText}, quality ${qLabel}/${qScore}. Expanded indicators: ${macdText}; ${adxText}; ${stochRsiText}.${mtfText}`,
-    evidenceRowState: `${bias} bias; trend=${trend}; momentum=${momentum}; priceVsEMA200=${priceVs}; MACD=${tf.macd?.state || "unknown"}; ADX=${tf.adx14?.trendStrength || "unknown"}; StochRSI=${tf.stochRsi14?.state || "unknown"}; source=${sourceText}`,
+    summary: `Technical context is usable as confirmation context only: ${bias} bias, confidence ${conf}, source ${sourceText}, quality ${qLabel}/${qScore}. Expanded indicators: ${macdText}; ${adxText}; ${stochRsiText}. ${strategyText}.${mtfText}`,
+    evidenceRowState: `${bias} bias; trend=${trend}; momentum=${momentum}; priceVsEMA200=${priceVs}; MACD=${tf.macd?.state || "unknown"}; ADX=${tf.adx14?.trendStrength || "unknown"}; StochRSI=${tf.stochRsi14?.state || "unknown"}; strategy=${strategy.aggregateBias || "unknown"}; source=${sourceText}`,
     implication: `${bias} technical confirmation context; must not override incomplete macro/event evidence`,
     reliability: qLabel,
     usable: true,
-    section: `Technical context is available and usable only as confirmation context, not as a macro override. Selected source: ${sourceText}. Data quality: ${qLabel} with score ${qScore}. Technical bias: ${bias} with confidence ${conf}. On ${tfKey || "selected timeframe"}, trend=${trend}, momentum=${momentum}, priceVsEMA200=${priceVs}, RSI14=${rsi}, ATR14=${atr}, EMA20=${ema20}, EMA50=${ema50}, EMA200=${ema200}. Expanded indicators: ${macdText}; ${adxText}; ${bollingerText}; ${keltnerText}; ${stochRsiText}; expandedIndicatorScore=${expandedScoreText}. Support=${support}; resistance=${resistance}. This can confirm, weaken, or contradict macro context, but it cannot override missing FRED drivers, blank event actual/forecast values, or absent replay evidence.${mtfText}`,
+    section: `Technical context is available and usable only as confirmation context, not as a macro override. Selected source: ${sourceText}. Data quality: ${qLabel} with score ${qScore}. Technical bias: ${bias} with confidence ${conf}. On ${tfKey || "selected timeframe"}, trend=${trend}, momentum=${momentum}, priceVsEMA200=${priceVs}, RSI14=${rsi}, ATR14=${atr}, EMA20=${ema20}, EMA50=${ema50}, EMA200=${ema200}. Expanded indicators: ${macdText}; ${adxText}; ${bollingerText}; ${keltnerText}; ${stochRsiText}; expandedIndicatorScore=${expandedScoreText}. ${strategyText}. Support=${support}; resistance=${resistance}. This can confirm, weaken, or contradict macro context, but it cannot override missing FRED drivers, blank event actual/forecast values, or absent replay evidence.${mtfText}`,
     alignment: bias,
   };
 }
@@ -3210,6 +3571,67 @@ function collectTechnicalStochRsiValues(snapshot) {
     .filter((x) => Number.isFinite(x));
 }
 
+
+function collectMentionedRsiNumbers(reportText) {
+  const s = String(reportText || "");
+  const values = [];
+
+  // Important:
+  // - RSI14 is an indicator name/period, not an RSI numeric value.
+  // - RSI threshold language such as "below 30", "< 30", "above 70", "> 70" is not a reported RSI value.
+  // - Capture only explicit measured RSI values after separators or direct value verbs.
+  // Valid measured-value examples:
+  //   RSI14=43.61
+  //   RSI14: 43.61
+  //   RSI is 43.61
+  //   RSI at 43.61
+  // Invalid/non-value examples:
+  //   RSI14
+  //   RSI below 30
+  //   RSI < 30
+  //   RSI above 70
+  //   RSI > 70
+  //   RSI value below 30
+  const patterns = [
+    /\bRSI(?:14)?\s*(?:=|:)\s*([0-9]{1,3}(?:\.[0-9]+)?)/gi,
+    /\bRSI(?:14)?\s+(?:is|at|was|reads?)\s*([0-9]{1,3}(?:\.[0-9]+)?)(?!\s*(?:threshold|level))/gi,
+    /\bRSI\s*(?:\(\s*14\s*\))?\s*(?:=|:)\s*([0-9]{1,3}(?:\.[0-9]+)?)/gi,
+  ];
+
+  for (const p of patterns) {
+    for (const m of s.matchAll(p)) {
+      const full = String(m[0] || "");
+      const before = s.slice(Math.max(0, m.index - 35), m.index);
+      const after = s.slice(m.index, Math.min(s.length, m.index + full.length + 35));
+      const context = `${before} ${after}`;
+
+      // Do not treat threshold references as actual RSI measurements.
+      if (/\b(?:below|under|less than|<|above|over|greater than|>)\s*(?:30|70)\b/i.test(context)) continue;
+      if (/\b(?:oversold|overbought|threshold|classic|level)\b/i.test(context) && /\b(?:30|70)\b/.test(full)) continue;
+
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n >= 0 && n <= 100) {
+        values.push(Number(n.toFixed(2)));
+      }
+    }
+  }
+
+  return [...new Set(values)];
+}
+
+function rsiMentionMatchesSnapshot(value, snapshotRsiValues) {
+  return snapshotRsiValues.some((r) => Math.abs(Number(r) - Number(value)) <= 0.75);
+}
+
+function mentionsAlignmentActionAsStrategyModule(reportText, snapshot) {
+  const action = String(snapshot?.alignmentContext?.action || "");
+  if (!action) return false;
+  const escaped = action.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`strategy modules?[\\s\\S]{0,120}${escaped}|${escaped}[\\s\\S]{0,120}strategy modules?`, "i");
+  return re.test(String(reportText || ""));
+}
+
+
 function collectTechnicalRsiValues(snapshot) {
   const tfs = snapshot?.technicalContext?.timeframes || {};
   return Object.values(tfs)
@@ -3234,6 +3656,17 @@ function reportMentionsTechnicalConfirmedEvidence(text) {
   const bearish = getSectionText(s, "5");
   const bullish = getSectionText(s, "4");
   const joined = `${bullish}\n${bearish}`;
+
+  // Direct line-level guard: "Confirmed evidence: Technical context ..."
+  if (/Confirmed evidence\s*:\s*[^\n]*(technical context|technical bias|technicals|strategy modules?|EMA|RSI|MACD|ADX|Bollinger|Keltner|Stoch(?:astic)?\s*RSI)/i.test(joined)) {
+    return true;
+  }
+
+  // Multi-line guard: Confirmed evidence followed shortly by technical-only language
+  if (/Confirmed evidence\s*:[\s\S]{0,220}(technical context|technical bias|technicals|strategy modules?|EMA alignment|RSI14|MACD|ADX|Bollinger|Keltner|Stoch(?:astic)?\s*RSI)/i.test(joined)) {
+    return true;
+  }
+
   return /Confirmed evidence\s*:\s*(?:[^\n]*technical|[\s\S]{0,180}technical context|[\s\S]{0,180}technical bias|[\s\S]{0,180}bearish bias|[\s\S]{0,180}bullish bias)/i.test(joined);
 }
 
@@ -3581,6 +4014,29 @@ function validateAiGoldReport(output, snapshot) {
   }
 
 
+
+  // 14c) Numeric RSI hallucination validator
+  const mentionedRsiNumbers = collectMentionedRsiNumbers(text);
+  for (const mentionedRsi of mentionedRsiNumbers) {
+    if (!rsiMentionMatchesSnapshot(mentionedRsi, rsiValues)) {
+      issues.push({
+        severity: "high",
+        code: "rsi_numeric_mismatch",
+        message: `AI mentioned RSI value ${mentionedRsi}, but it does not match any RSI value in the snapshot. Snapshot RSI values: ${rsiValues.join(", ") || "none"}.`,
+      });
+    }
+  }
+
+  // 14d) Strategy module / alignment action confusion validator
+  if (mentionsAlignmentActionAsStrategyModule(text, snapshot)) {
+    issues.push({
+      severity: "medium",
+      code: "strategy_module_alignment_action_confusion",
+      message: "AI described alignmentContext.action as if it were a strategy module. Strategy modules are trend, momentum, volatility, and structure only.",
+    });
+  }
+
+
   // 15) Technical context must not be treated as confirmed evidence
   if (reportMentionsTechnicalConfirmedEvidence(text)) {
     issues.push({
@@ -3636,10 +4092,32 @@ function validateAiGoldReport(output, snapshot) {
 }
 
 function formatValidationReport(validation) {
-  if (!validation?.issues?.length) return "AI output validation passed.";
-  return validation.issues
-    .map((i, idx) => `${idx + 1}. [${i.severity.toUpperCase()}] ${i.code}: ${i.message}`)
+  const issues = validation?.issues || [];
+  if (!issues.length) return "AI output validation passed.";
+
+  const high = issues.filter((i) => String(i.severity || "").toLowerCase() === "high");
+  const medium = issues.filter((i) => String(i.severity || "").toLowerCase() === "medium");
+  const low = issues.filter((i) => String(i.severity || "").toLowerCase() === "low");
+  const visible = high.length ? high : [...medium, ...low];
+
+  const title = high.length ? "REJECTED AI OUTPUT VALIDATION" : "AI OUTPUT DIAGNOSTICS";
+  const subtitle = high.length
+    ? "High-severity issue(s) caused the raw AI output to be rejected."
+    : "Non-critical diagnostic warning(s). The raw AI output was not rejected.";
+
+  const lines = visible
+    .map((i, idx) => `${idx + 1}. [${String(i.severity || "").toUpperCase()}] ${i.code}: ${i.message}`)
     .join("\n");
+
+  const suppressedCount = high.length ? medium.length + low.length : 0;
+  const suppressed = suppressedCount
+    ? `\n\nSuppressed non-critical diagnostics: ${suppressedCount} item(s) (${medium.length} medium, ${low.length} low).`
+    : "";
+
+  return `${title}
+${subtitle}
+
+${lines}${suppressed}`;
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -7609,7 +8087,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.39.1",
+        appVersion: "GoldScope v2.40.4.2",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -7697,6 +8175,7 @@ STRICT SOURCE RULES:
 24. If alignmentContext exists, use it as the final macro/technical alignment rule; it can confirm, weaken, or contradict, but cannot override missing macro/event/replay evidence.
 25. If technicalContext contains expanded indicators, summarize MACD, ADX, Bollinger Bands, Keltner Channels, and Stochastic RSI as confirmation context only. Do not call these confirmed macro evidence.
 26. Do not call Stochastic RSI overbought unless K >= 80; do not call it oversold unless K <= 20.
+27. If technicalContext.strategyModules exists, summarize Trend, Momentum, Volatility, and Structure modules as technical confirmation/contradiction context only. Do not treat strategy modules as trade instructions or confirmed macro evidence.
 25. If replayEvidence.count > 0, summarize latest and recent replay reaction patterns. Treat replay as evidence only when qualityScore is adequate and event context is comparable.
 
 MACRO LOGIC GUARD:
@@ -7795,7 +8274,7 @@ Use this table. In the News row, explicitly mention contextQualityFlags.newsStre
 - Identify exactly what evidence is missing.
 
 7. Technical confirmation
-- If technicalContext is available, summarize trend, EMA alignment, RSI14, ATR14, support/resistance and technicalBias.
+- If technicalContext is available, summarize trend, EMA alignment, RSI14, ATR14, support/resistance, technicalBias, expanded indicators, and strategyModules.
 - If technicalContext.status is unreliable or usableForScenario is false, say it is unreliable/masked and do not use it as directional evidence.
 - Explain whether technical context confirms, weakens, or contradicts the macro scenario only when usableForScenario is true.
 - If technicalContext is missing/error, say it is unavailable.
@@ -7937,7 +8416,7 @@ ${JSON.stringify(data, null, 2)}`);
               setAiStatus("AI rejected: safe report generated");
             } else {
               const decorated = validation.issues.length
-                ? `${out}\n\n---\nREJECTED AI OUTPUT VALIDATION\n${validationText}`
+                ? `${out}\n\n---\n${validationText}`
                 : out;
               setAiOutput(decorated);
               setAiStatus(validation.ok
@@ -7988,7 +8467,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.39.1",
+        appVersion: "GoldScope v2.40.4.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -8117,12 +8596,22 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Simplified operator UX: on</Badge>
               <Badge value="supportive">MACD/ADX/Bollinger/Keltner/StochRSI: on</Badge>
               <Badge value="supportive">Validation display cleanup: on</Badge>
+              <Badge value="supportive">Strategy modules: on</Badge>
+              <Badge value="supportive">Strategy validator: on</Badge>
+              <Badge value="supportive">RSI14 parser fix: on</Badge>
+              <Badge value="supportive">Technical quality gate calibrated: on</Badge>
+              <Badge value="supportive">RSI threshold parser fix: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
               <Badge value="supportive">Simplified nav: on</Badge>
               <Badge value="supportive">Expanded indicators: on</Badge>
               <Badge value="supportive">Cleaner rejected-output validation: on</Badge>
+              <Badge value="supportive">Trend/Momentum/Volatility/Structure: on</Badge>
+              <Badge value="supportive">Validation footer logic: on</Badge>
+              <Badge value="supportive">RSI numeric parser: strict</Badge>
+              <Badge value="supportive">StochRSI overextension warning-only: on</Badge>
+              <Badge value="supportive">RSI below/above threshold ignored: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
@@ -8147,12 +8636,22 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Simplified operator UX: on</Badge>
               <Badge value="supportive">MACD/ADX/Bollinger/Keltner/StochRSI: on</Badge>
               <Badge value="supportive">Validation display cleanup: on</Badge>
+              <Badge value="supportive">Strategy modules: on</Badge>
+              <Badge value="supportive">Strategy validator: on</Badge>
+              <Badge value="supportive">RSI14 parser fix: on</Badge>
+              <Badge value="supportive">Technical quality gate calibrated: on</Badge>
+              <Badge value="supportive">RSI threshold parser fix: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
               <Badge value="supportive">Simplified nav: on</Badge>
               <Badge value="supportive">Expanded indicators: on</Badge>
               <Badge value="supportive">Cleaner rejected-output validation: on</Badge>
+              <Badge value="supportive">Trend/Momentum/Volatility/Structure: on</Badge>
+              <Badge value="supportive">Validation footer logic: on</Badge>
+              <Badge value="supportive">RSI numeric parser: strict</Badge>
+              <Badge value="supportive">StochRSI overextension warning-only: on</Badge>
+              <Badge value="supportive">RSI below/above threshold ignored: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
@@ -8239,7 +8738,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.39.1",
+        appVersion: "GoldScope v2.40.4.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -8442,7 +8941,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.39.1",
+        appVersion: "GoldScope v2.40.4.2",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -8736,14 +9235,14 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.39.1</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.40.4.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
               <Badge value={bias.color === C.green ? "bullish" : bias.color === C.red ? "bearish" : "warning"}>{bias.label.replace("Research bias: ", "")}</Badge>
             </div>
             <p style={{ color: C.muted, margin: "7px 0 0", fontSize: 13 }}>
-              XAUUSD research terminal · simplified workflow · macro + expanded technical indicators + replay-aware scenario lab · no broker connection · no auto-trading
+              XAUUSD research terminal · simplified workflow · macro + expanded technical strategy modules + replay-aware scenario lab · no broker connection · no auto-trading
             </p>
           </div>
           <div className="layout-note" style={{ display: "flex", gap: 8 }}>
