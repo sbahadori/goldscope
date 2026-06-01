@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.40.13.1 - Dominant Validator Helper Scope Hotfix
+title GoldScope v2.40.14 - Markdown Evidence Label + Completion Gate Validator
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.40.13.1 - Dominant Validator Helper Scope Hotfix
+echo   GoldScope v2.40.14 - Markdown Evidence Label + Completion Gate Validator
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.

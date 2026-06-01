@@ -4044,6 +4044,93 @@ function containsDefinitiveRsiOversoldClaim(reportText) {
 
 
 function validateAiGoldReport(output, snapshot) {
+  const hasMarkdownTechnicalConfirmedEvidenceLocal = (reportText) => {
+    const s = String(reportText || "");
+    const confirmedLabel = String.raw`(?:[-*]\s*)?(?:\*\*)?\s*Confirmed evidence\s*(?:\*\*)?\s*:`;
+    const techTerms = String.raw`(?:Technical context|technical context|Technicals|technicals|technical bias|EMA|RSI|MACD|ADX|Bollinger|Keltner|Stoch(?:astic)?\s*RSI|strategy\s*modules?|StrategyModules)`;
+    const sameLine = new RegExp(`${confirmedLabel}[^\\n]{0,260}\\b${techTerms}\\b`, "i");
+    const nextLine = new RegExp(`${confirmedLabel}\\s*\\n\\s*(?:[-*]\\s*)?[^\\n]{0,220}\\b${techTerms}\\b`, "i");
+    return sameLine.test(s) || nextLine.test(s);
+  };
+
+  const isFinalResearchNoteTruncatedLocal = (reportText) => {
+    const s = String(reportText || "").trim();
+    const finalIdx = s.search(/10\.\s*(?:\*\*)?\s*Final research note/i);
+    if (finalIdx === -1) return false;
+
+    const tail = s.slice(finalIdx).trim();
+    if (tail.includes("<END_GOLDSCOPE_REPORT>")) return false;
+
+    const afterHeader = tail
+      .replace(/^10\.\s*(?:\*\*)?\s*Final research note(?:\*\*)?\s*/i, "")
+      .replace(/^[-:\s]+/, "")
+      .trim();
+
+    if (!afterHeader) return true;
+    if (afterHeader.length < 90) return true;
+
+    const lastLine = afterHeader.split(/\n/).map((x) => x.trim()).filter(Boolean).pop() || "";
+    const incompleteEnding = /\b(?:and|or|but|because|with|without|while|until|unless|bear|bull|bullish|bearish|macro|technical|event|replay)$/i.test(lastLine);
+    const hasTerminalPunctuation = /[.!?]$/.test(lastLine);
+
+    return incompleteEnding || !hasTerminalPunctuation;
+  };
+
+  const hasTechnicalPredictionOverclaimLocal = (reportText) => {
+    const s = String(reportText || "");
+    const patterns = [
+      /\btechnical context\b[\s\S]{0,220}\blikely to continue (?:a |the )?(?:downward|upward|bearish|bullish)?\s*trend\b/i,
+      /\btechnical(?:s| context| bias)?\b[\s\S]{0,180}\bwill continue\b/i,
+      /\btechnical(?:s| context| bias)?\b[\s\S]{0,180}\bconfirms? bearish trend\b/i,
+      /\btechnical(?:s| context| bias)?\b[\s\S]{0,180}\bconfirms? bullish trend\b/i,
+      /\bconfirmed bearish evidence\b/i,
+      /\bconfirmed bullish evidence\b/i,
+      /\blikely to continue downward trend\b/i,
+      /\blikely to continue upward trend\b/i,
+    ];
+    return patterns.some((p) => p.test(s));
+  };
+
+  const getExpectedAvoidWindowLocal = (snap) => {
+    return String(
+      snap?.deterministicScenarioLab?.nextMajor?.avoidWindow ||
+      snap?.calendar?.nextMajor?.avoidWindow ||
+      ""
+    ).trim();
+  };
+
+  const getExpectedNextEventNameLocal = (snap) => {
+    return String(
+      snap?.deterministicScenarioLab?.nextMajor?.name ||
+      snap?.calendar?.nextMajor?.name ||
+      ""
+    ).trim();
+  };
+
+  const hasAvoidWindowExactMismatchLocal = (reportText, snap) => {
+    const expected = getExpectedAvoidWindowLocal(snap);
+    if (!expected) return false;
+    const s = String(reportText || "");
+    if (!/avoid[- ]window/i.test(s)) return false;
+    return !s.includes(expected);
+  };
+
+  const hasNextEventExactMismatchLocal = (reportText, snap) => {
+    const expected = getExpectedNextEventNameLocal(snap);
+    if (!expected) return false;
+    const s = String(reportText || "");
+    if (!/Next event/i.test(s)) return false;
+
+    const nextEventLine = (s.match(/(?:^|\n)\s*[-*]?\s*(?:\*\*)?\s*Next event(?:\*\*)?\s*:?[^\n]*/i) || [])[0] || "";
+    if (!nextEventLine) return false;
+
+    // The exact event name must be present, and "(nextMajor event)" should not be used as a substitute label.
+    if (!nextEventLine.includes(expected)) return true;
+    if (/\(nextMajor event\)/i.test(nextEventLine)) return true;
+    return false;
+  };
+
+
   const extractDominantScenarioFromReportLocal = (reportText) => {
     const s = String(reportText || "");
     const firstSection = s.slice(0, 1400);
@@ -4184,6 +4271,47 @@ function validateAiGoldReport(output, snapshot) {
   const issues = [];
   const text = String(output || "");
   const lower = text.toLowerCase();
+
+  // 0a) markdown evidence-label, completion, and exact-field validation
+  if (hasMarkdownTechnicalConfirmedEvidenceLocal(text)) {
+    issues.push({
+      severity: "high",
+      code: "technical_confirmed_evidence_error",
+      message: "AI placed technical context or technical indicators under Confirmed evidence, including markdown-formatted evidence labels. Technicals are confirmation/contradiction context only.",
+    });
+  }
+
+  if (!text.includes("<END_GOLDSCOPE_REPORT>") && isFinalResearchNoteTruncatedLocal(text)) {
+    issues.push({
+      severity: "high",
+      code: "incomplete_final_report_error",
+      message: "AI output is missing <END_GOLDSCOPE_REPORT> and the Final research note appears truncated or unfinished.",
+    });
+  }
+
+  if (hasTechnicalPredictionOverclaimLocal(text)) {
+    issues.push({
+      severity: "medium",
+      code: "technical_prediction_overclaim",
+      message: "AI used technical context as predictive/confirmed trend language. Technical context is confirmation context only and must not imply trend continuation without macro/event/replay confirmation.",
+    });
+  }
+
+  if (hasAvoidWindowExactMismatchLocal(text, snapshot)) {
+    issues.push({
+      severity: "medium",
+      code: "avoid_window_exact_mismatch",
+      message: `AI did not copy the avoid-window exactly. Expected: "${getExpectedAvoidWindowLocal(snapshot)}".`,
+    });
+  }
+
+  if (hasNextEventExactMismatchLocal(text, snapshot)) {
+    issues.push({
+      severity: "medium",
+      code: "next_event_exact_mismatch",
+      message: `AI did not use the exact nextMajor event name cleanly. Expected: "${getExpectedNextEventNameLocal(snapshot)}".`,
+    });
+  }
 
   // 0) dominant scenario overclaim and technical fact checks
   const aiDominant = extractDominantScenarioFromReportLocal(text);
@@ -8620,7 +8748,7 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.40.13.1.2",
+        appVersion: "GoldScope v2.40.14.2",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -9020,7 +9148,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.13.1.2",
+        appVersion: "GoldScope v2.40.14.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -9165,6 +9293,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Macro gate hints: on</Badge>
               <Badge value="supportive">Dominant overclaim validator: on</Badge>
               <Badge value="supportive">Dominant validator scope hotfix: on</Badge>
+              <Badge value="supportive">Markdown evidence label validator: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -9187,6 +9316,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Deterministic decision gates: on</Badge>
               <Badge value="supportive">Technical numeric fact validator: on</Badge>
               <Badge value="supportive">Validator local helpers: on</Badge>
+              <Badge value="supportive">Completion gate validator: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
@@ -9227,6 +9357,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Macro gate hints: on</Badge>
               <Badge value="supportive">Dominant overclaim validator: on</Badge>
               <Badge value="supportive">Dominant validator scope hotfix: on</Badge>
+              <Badge value="supportive">Markdown evidence label validator: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -9249,6 +9380,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Deterministic decision gates: on</Badge>
               <Badge value="supportive">Technical numeric fact validator: on</Badge>
               <Badge value="supportive">Validator local helpers: on</Badge>
+              <Badge value="supportive">Completion gate validator: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
@@ -9335,7 +9467,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.13.1.2",
+        appVersion: "GoldScope v2.40.14.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -9538,7 +9670,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.13.1.2",
+        appVersion: "GoldScope v2.40.14.2",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -9832,7 +9964,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.40.13.1.2</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.40.14.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
