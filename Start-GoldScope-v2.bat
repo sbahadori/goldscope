@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.39 - Technical Indicator Expansion
+title GoldScope v2.39.1 - Validation Display Cleanup
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.39 - Technical Indicator Expansion
+echo   GoldScope v2.39.1 - Validation Display Cleanup
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.

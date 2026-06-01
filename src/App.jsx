@@ -3092,6 +3092,26 @@ function technicalCaseWording(tech, caseType) {
   return "Technical context is confirmation/contradiction context only.";
 }
 
+
+function formatRejectedValidationForDisplay(validation) {
+  const issues = validation?.issues || [];
+  const high = issues.filter((i) => String(i.severity || "").toLowerCase() === "high");
+  const medium = issues.filter((i) => String(i.severity || "").toLowerCase() === "medium");
+  const low = issues.filter((i) => String(i.severity || "").toLowerCase() === "low");
+
+  const highLines = high.length
+    ? high.map((i, idx) => `${idx + 1}. [HIGH] ${i.code}: ${i.message}`).join("\n")
+    : "None.";
+
+  const suppressed = medium.length + low.length;
+  const suppressedLine = suppressed
+    ? `\n\nSuppressed non-critical diagnostics: ${suppressed} item(s) (${medium.length} medium, ${low.length} low). These belong to the rejected raw AI output and are hidden from the main report to avoid confusing the operator.`
+    : "";
+
+  return `High-severity rejection reasons only:
+${highLines}${suppressedLine}`;
+}
+
 function buildValidationSafeGoldReport(snapshot, validation) {
   const nextMajor = getNextMajorEvent(snapshot) || {};
   const flags = snapshot?.contextQualityFlags || {};
@@ -3112,12 +3132,10 @@ function buildValidationSafeGoldReport(snapshot, validation) {
   const nextTime = safeValue(nextMajor.time, "missing time");
   const avoidWindow = safeValue(nextMajor.avoidWindow, "missing avoid-window");
 
-  const validationLines = (validation?.issues || [])
-    .map((i, idx) => `${idx + 1}. [${String(i.severity || "").toUpperCase()}] ${i.code}: ${i.message}`)
-    .join("\n");
+  const validationDisplay = formatRejectedValidationForDisplay(validation);
 
   return `VALIDATION-GATED SAFE REPORT
-The original AI report was rejected because it failed high-severity validation. The following report is generated deterministically from the GoldScope snapshot. The validation list at the end refers to the rejected original AI output, not to this safe report.
+The original AI report was rejected because it failed high-severity validation. The following report is generated deterministically from the GoldScope snapshot. The validation list at the end refers to the rejected original AI output, not to this safe report. Non-critical raw-output diagnostics are summarized instead of fully displayed.
 
 1. Dominant research scenario
 Wait-Neutral.
@@ -3178,7 +3196,9 @@ Avoid-window: ${avoidWindow}.
 This report remains Wait-Neutral because the evidence base is incomplete and the rejected AI output contained validation failures. ${techDesc.usable ? "Technical context is available as confirmation context, but directional bias remains blocked until macro drivers, event outcomes, and replay evidence improve." : "Directional bias should remain blocked until macro drivers, event outcomes, replay evidence, and usable technical context improve."} <END_GOLDSCOPE_REPORT>
 
 REJECTED AI OUTPUT VALIDATION
-${validationLines}`;
+This section explains why the raw AI response was rejected. It is not an error in the safe report.
+
+${validationDisplay}`;
 }
 
 
@@ -7589,7 +7609,7 @@ ${err.message}`);
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.39",
+        appVersion: "GoldScope v2.39.1",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -7968,7 +7988,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.39",
+        appVersion: "GoldScope v2.39.1",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -8096,11 +8116,13 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Manual replay hidden: on</Badge>
               <Badge value="supportive">Simplified operator UX: on</Badge>
               <Badge value="supportive">MACD/ADX/Bollinger/Keltner/StochRSI: on</Badge>
+              <Badge value="supportive">Validation display cleanup: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
               <Badge value="supportive">Simplified nav: on</Badge>
               <Badge value="supportive">Expanded indicators: on</Badge>
+              <Badge value="supportive">Cleaner rejected-output validation: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
@@ -8124,11 +8146,13 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Manual replay hidden: on</Badge>
               <Badge value="supportive">Simplified operator UX: on</Badge>
               <Badge value="supportive">MACD/ADX/Bollinger/Keltner/StochRSI: on</Badge>
+              <Badge value="supportive">Validation display cleanup: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
               <Badge value="supportive">Simplified nav: on</Badge>
               <Badge value="supportive">Expanded indicators: on</Badge>
+              <Badge value="supportive">Cleaner rejected-output validation: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
@@ -8215,7 +8239,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.39",
+        appVersion: "GoldScope v2.39.1",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -8418,7 +8442,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.39",
+        appVersion: "GoldScope v2.39.1",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -8712,7 +8736,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.39</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.39.1</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
