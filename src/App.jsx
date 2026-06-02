@@ -3584,6 +3584,7 @@ function buildRejectedRawAiDebugSnippets(rawOutput, sanitizedOutput, validation)
       sourceText,
       [
         /\bRSI(?:14)?\b[\s\S]{0,120}\b(?:overbought|oversold|extreme|territory|condition|levels?)\b/i,
+        /\b(?:EMA alignment|trend|momentum|technical context|technical bias)[^\n]{0,160}\bRSI(?:14)?\s+(?:overbought|oversold)\b/i,
         /\b(?:overbought|oversold|extreme)\b[\s\S]{0,120}\bRSI(?:14)?\b/i,
         /\bStoch(?:astic)?\s*RSI\b[\s\S]{0,140}\b(?:overbought|oversold|extreme)\b/i,
       ],
@@ -3856,7 +3857,7 @@ function reportMentionsTechnicalConfirmedEvidence(text) {
   return /Confirmed evidence\s*:\s*(?:[^\n]*technical|[\s\S]{0,180}technical context|[\s\S]{0,180}technical bias|[\s\S]{0,180}bearish bias|[\s\S]{0,180}bullish bias)/i.test(joined);
 }
 
-function hasThinkingArtifact(text) {
+function hasThinkingArtifactLocal(text) {
   return /<\/think>|<think>|\/think\b|Okay,\s*the user wants|Let me\s|I need to\s|chain[- ]of[- ]thought|hidden reasoning|private thinking|reasoning artifact/i.test(String(text || ""));
 }
 
@@ -4020,6 +4021,12 @@ function containsDefinitiveRsiOverboughtClaim(reportText) {
     /\bRSI(?:14)?\s+indicates\s+overbought\b/i,
     /\bRSI(?:14)?\s+remains\s+overbought\b/i,
     /\boverbought\s+RSI(?:14)?\b/i,
+
+    // v2.40.16: bare definitive phrases caught after false negative:
+    // "EMA alignment, RSI overbought", "trend, RSI overbought", "RSI14 overbought".
+    /\bRSI(?:14)?\s+overbought\b/i,
+    /\b(?:EMA alignment|trend|momentum|technical context|technical bias|bearish|bullish)[^.\n]{0,120}\bRSI(?:14)?\s+overbought\b/i,
+    /\bRSI(?:14)?\s+overbought[^.\n]{0,120}\b(?:EMA alignment|trend|momentum|technical context|technical bias|bearish|bullish)\b/i,
   ];
 
   return patterns.some((p) => p.test(classicOnly));
@@ -4037,6 +4044,11 @@ function containsDefinitiveRsiOversoldClaim(reportText) {
     /\bRSI(?:14)?\s+indicates\s+oversold\b/i,
     /\bRSI(?:14)?\s+remains\s+oversold\b/i,
     /\boversold\s+RSI(?:14)?\b/i,
+
+    // v2.40.16: bare definitive phrases.
+    /\bRSI(?:14)?\s+oversold\b/i,
+    /\b(?:EMA alignment|trend|momentum|technical context|technical bias|bearish|bullish)[^.\n]{0,120}\bRSI(?:14)?\s+oversold\b/i,
+    /\bRSI(?:14)?\s+oversold[^.\n]{0,120}\b(?:EMA alignment|trend|momentum|technical context|technical bias|bearish|bullish)\b/i,
   ];
 
   return patterns.some((p) => p.test(classicOnly));
@@ -4044,6 +4056,10 @@ function containsDefinitiveRsiOversoldClaim(reportText) {
 
 
 function validateAiGoldReport(output, snapshot) {
+  const hasThinkingArtifactLocal = (value) =>
+    /<\s*\/?\s*think(?:ing)?\s*>|\/think\b|\breasoning artifact\b|\binternal planning text\b/i.test(String(value || ""));
+
+
   const hasMarkdownTechnicalConfirmedEvidenceLocal = (reportText) => {
     const s = String(reportText || "");
     const confirmedLabel = String.raw`(?:[-*]\s*)?(?:\*\*)?\s*Confirmed evidence\s*(?:\*\*)?\s*:`;
@@ -4611,7 +4627,7 @@ function validateAiGoldReport(output, snapshot) {
 
 
   // 13) Think-tag / hidden-reasoning artifact rejection
-  if (hasThinkingArtifact(text)) {
+  if (hasThinkingArtifactLocal(text)) {
     issues.push({
       severity: "high",
       code: "thinking_artifact_leak",
@@ -8748,7 +8764,7 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.40.14.2",
+        appVersion: "GoldScope v2.40.16.2",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -8800,9 +8816,39 @@ function buildGoldScopeContextSnapshot() {
         contradiction: "Contradiction detector: identify conflicts between macro, news, replay and source health. Lower confidence if evidence is stale or missing.",
       }[mode] || "Full scenario lab.";
 
+      const missingDrivers = snapshot?.contextQualityFlags?.missingCriticalMacroDrivers || [];
+      const fredRows = snapshot?.dataReadiness?.fredRows ?? 0;
+      const replayCount = snapshot?.dataReadiness?.replayRecords ?? 0;
+      const dominant = snapshot?.deterministicScenarioLab?.dominant || "Wait / neutral scenario";
+      const nextEvent = snapshot?.deterministicScenarioLab?.nextMajor?.name || "unknown";
+      const nextDate = snapshot?.deterministicScenarioLab?.nextMajor?.date || "unknown";
+      const maxConf = snapshot?.contextQualityFlags?.maxRecommendedConfidence ?? 35;
+      const newsStrength = snapshot?.contextQualityFlags?.newsStrength || "unknown";
+      const eventQuality = snapshot?.contextQualityFlags?.eventDataCompleteness?.nextMajor?.quality || "unknown";
+      const mustBeWaitNeutral =
+        String(dominant).toLowerCase().includes("wait") &&
+        Number(replayCount) === 0 &&
+        String(eventQuality).toLowerCase() === "date-only" &&
+        Array.isArray(missingDrivers) &&
+        missingDrivers.length > 0;
+
+      const snapshotSummary = `SYSTEM STATE SUMMARY — READ FIRST:
+- deterministicScenarioLab.dominant = "${dominant}"
+- FRED loaded: ${fredRows}/11 | missingCriticalMacroDrivers = [${missingDrivers.join(", ")}]
+- replayRecords = ${replayCount}
+- nextMajor = "${nextEvent}" on ${nextDate} | eventData.quality = "${eventQuality}"
+- newsStrength = "${newsStrength}"
+- maxRecommendedConfidence = ${maxConf}
+${mustBeWaitNeutral ? `HARD RULE — YOU MUST OUTPUT WAIT-NEUTRAL:
+All conditions are met: deterministic dominant is Wait/neutral, replayRecords=0, eventData=date-only, and missing critical macro drivers exist.
+Section 1 MUST be "Wait-Neutral". Do not select Bullish or Bearish.
+You may describe conditional bullish/bearish pressure, but the dominant research scenario must remain Wait-Neutral.` : ""}`;
+
       return `/no_think
 
 You are GoldScope's local AI analyst for XAUUSD / gold only.
+
+${snapshotSummary}
 
 Do not reveal hidden reasoning, private thinking, planning text, or chain-of-thought. Give only the final research report.
 
@@ -8894,6 +8940,13 @@ Before finalizing, check your own answer for these mistakes:
 
 TASK:
 ${modeGuide}
+
+SELF-CONSISTENCY CHECK BEFORE WRITING SECTION 1:
+- If macro drivers are missing, the dominant scenario cannot be fully directional.
+- If replay evidence is missing, post-event validation is absent.
+- If event actual/forecast fields are blank, future event triggers are conditional, not confirmed.
+- If all three are true, section 1 must be Wait-Neutral.
+- If you write that event outcomes or replay evidence are still required, section 1 must be Wait-Neutral.
 
 OUTPUT DEPTH:
 ${depthGuide}
@@ -9005,6 +9058,24 @@ Do not invent numeric thresholds.
     }
 
     async function callOllama(prompt, label) {
+      const hasThinkingArtifactLocal = (value) =>
+        /<\s*\/?\s*think(?:ing)?\s*>|\/think\b|\breasoning artifact\b|\binternal planning text\b/i.test(String(value || ""));
+
+      const stripThinkingArtifactsLocal = (value) => {
+        let s = String(value || "");
+
+        s = s.replace(/<\s*think\s*>[\s\S]*?<\s*\/\s*think\s*>/gi, "");
+        s = s.replace(/<\s*thinking\s*>[\s\S]*?<\s*\/\s*thinking\s*>/gi, "");
+        s = s.replace(/<\s*\/?\s*think(?:ing)?\s*>/gi, "");
+        s = s.replace(/^\/think\s*/gi, "");
+
+        const firstSection = s.search(/\b1\.\s*(?:\*\*)?\s*Dominant research scenario/i);
+        if (firstSection > 0) s = s.slice(firstSection);
+
+        return s.trim();
+      };
+
+
       setAiRunning(true);
       setAiOutput("");
       setLastRaw("");
@@ -9027,11 +9098,18 @@ Do not invent numeric thresholds.
 
         const body = {
           model,
-          messages: [{ role: "user", content: prompt }],
+          messages: [
+            {
+              role: "system",
+              content: "You are a macro gold analyst. Do not output <think>, </think>, <thinking>, </thinking>, /think, hidden reasoning, planning text, or internal reasoning. Output only the final research report."
+            },
+            { role: "user", content: prompt },
+          ],
           stream: false,
           options: {
-            temperature: 0.15,
+            temperature: 0.1,
             num_predict: numPredict,
+            repeat_penalty: 1.1,
           },
         };
 
@@ -9064,7 +9142,54 @@ Do not invent numeric thresholds.
           data?.thinking ||
           "";
 
-        const out = cleanAiArtifacts(cleanModelOutput(rawOut));
+        let out = stripThinkingArtifactsLocal(cleanAiArtifacts(cleanModelOutput(rawOut)));
+
+        // Retry once only for thinking artifacts. Do not retry for macro/technical validation errors.
+        if (label !== "smoke test" && hasThinkingArtifactLocal(rawOut)) {
+          setAiStatus("thinking artifact detected; retrying once with stricter no-thinking prompt...");
+          const retryBody = {
+            ...body,
+            messages: [
+              {
+                role: "system",
+                content: "Output only the final GoldScope report. Never output <think>, </think>, <thinking>, </thinking>, /think, hidden reasoning, planning text, or internal reasoning. Start directly with section 1."
+              },
+              {
+                role: "user",
+                content: `${prompt}\n\nRETRY CONSTRAINT: Start directly with "1. Dominant research scenario". Do not output any think tags or internal reasoning.`
+              },
+            ],
+            options: {
+              ...body.options,
+              temperature: 0.05,
+            },
+          };
+
+          const retryRes = await fetchWithTimeout(`${OLLAMA_PROXY}/api/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(retryBody),
+          }, 360000);
+
+          const retryRawText = await retryRes.text();
+          setLastRaw(`${rawText}\n\n--- RETRY RAW RESPONSE ---\n${retryRawText}`);
+
+          if (retryRes.ok) {
+            try {
+              const retryData = JSON.parse(retryRawText);
+              const retryRawOut =
+                retryData?.message?.content ||
+                retryData?.response ||
+                retryData?.message?.thinking ||
+                retryData?.thinking ||
+                "";
+              const retryOut = stripThinkingArtifactsLocal(cleanAiArtifacts(cleanModelOutput(retryRawOut)));
+              if (retryOut.trim()) out = retryOut;
+            } catch {
+              // Keep first cleaned output if retry parsing fails.
+            }
+          }
+        }
 
         if (!out.trim()) {
           setAiOutput(`Ollama returned JSON, but no final text content was found after cleaning.
@@ -9148,7 +9273,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.14.2",
+        appVersion: "GoldScope v2.40.16.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -9294,6 +9419,9 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Dominant overclaim validator: on</Badge>
               <Badge value="supportive">Dominant validator scope hotfix: on</Badge>
               <Badge value="supportive">Markdown evidence label validator: on</Badge>
+              <Badge value="supportive">Thinking artifact retry-once: on</Badge>
+              <Badge value="supportive">Thinking helper scope hotfix: on</Badge>
+              <Badge value="supportive">Bare RSI extreme validator: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -9317,6 +9445,9 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Technical numeric fact validator: on</Badge>
               <Badge value="supportive">Validator local helpers: on</Badge>
               <Badge value="supportive">Completion gate validator: on</Badge>
+              <Badge value="supportive">Hard Wait-Neutral prompt anchor: on</Badge>
+              <Badge value="supportive">Local thinking cleaners: on</Badge>
+              <Badge value="supportive">StochRSI exclusion preserved: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
@@ -9358,6 +9489,9 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Dominant overclaim validator: on</Badge>
               <Badge value="supportive">Dominant validator scope hotfix: on</Badge>
               <Badge value="supportive">Markdown evidence label validator: on</Badge>
+              <Badge value="supportive">Thinking artifact retry-once: on</Badge>
+              <Badge value="supportive">Thinking helper scope hotfix: on</Badge>
+              <Badge value="supportive">Bare RSI extreme validator: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -9381,6 +9515,9 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Technical numeric fact validator: on</Badge>
               <Badge value="supportive">Validator local helpers: on</Badge>
               <Badge value="supportive">Completion gate validator: on</Badge>
+              <Badge value="supportive">Hard Wait-Neutral prompt anchor: on</Badge>
+              <Badge value="supportive">Local thinking cleaners: on</Badge>
+              <Badge value="supportive">StochRSI exclusion preserved: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
@@ -9467,7 +9604,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.14.2",
+        appVersion: "GoldScope v2.40.16.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -9670,7 +9807,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.14.2",
+        appVersion: "GoldScope v2.40.16.2",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -9964,7 +10101,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.40.14.2</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.40.16.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>

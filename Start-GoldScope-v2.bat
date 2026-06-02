@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.40.14 - Markdown Evidence Label + Completion Gate Validator
+title GoldScope v2.40.16 - Bare RSI Extreme Phrase Validator
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.40.14 - Markdown Evidence Label + Completion Gate Validator
+echo   GoldScope v2.40.16 - Bare RSI Extreme Phrase Validator
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.
