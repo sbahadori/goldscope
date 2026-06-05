@@ -2968,6 +2968,96 @@ function buildRsiStochRsiLanguageHint(rsiValue, stochRsiValue) {
 }
 
 
+
+function candleBody(c) { return Math.abs(Number(c.close) - Number(c.open)); }
+function candleRange(c) { return Math.max(0, Number(c.high) - Number(c.low)); }
+function upperShadow(c) { return Math.max(0, Number(c.high) - Math.max(Number(c.open), Number(c.close))); }
+function lowerShadow(c) { return Math.max(0, Math.min(Number(c.open), Number(c.close)) - Number(c.low)); }
+function candleDirection(c) {
+  if (Number(c.close) > Number(c.open)) return "bullish";
+  if (Number(c.close) < Number(c.open)) return "bearish";
+  return "neutral";
+}
+function candleMidpoint(c) { return (Number(c.open) + Number(c.close)) / 2; }
+function isSmallBody(c) {
+  const r = candleRange(c);
+  if (!Number.isFinite(r) || r <= 0) return false;
+  return candleBody(c) <= r * 0.25;
+}
+function detectSingleCandlePatterns(c) {
+  const r = candleRange(c), body = candleBody(c), up = upperShadow(c), low = lowerShadow(c), dir = candleDirection(c);
+  const patterns = [];
+  if (!Number.isFinite(r) || r <= 0) return patterns;
+  if (body <= r * 0.1) patterns.push({ name: "Doji", direction: "neutral", strength: "weak", reliability: "low", explanation: "Open and close are very close relative to the candle range." });
+  if (body > 0 && low >= body * 2 && up <= body * 0.6) patterns.push({ name: dir === "bearish" ? "Hammer-like candle" : "Hammer", direction: "bullish", strength: "medium", reliability: "medium", explanation: "Long lower shadow suggests rejection of lower prices." });
+  if (body > 0 && up >= body * 2 && low <= body * 0.6) patterns.push({ name: dir === "bullish" ? "Shooting-star-like candle" : "Shooting Star", direction: "bearish", strength: "medium", reliability: "medium", explanation: "Long upper shadow suggests rejection of higher prices." });
+  if (body <= r * 0.3 && up >= r * 0.35 && low >= r * 0.35) patterns.push({ name: "Spinning Top", direction: "neutral", strength: "weak", reliability: "low", explanation: "Small body with meaningful shadows suggests indecision." });
+  return patterns;
+}
+function detectTwoCandlePatterns(prev, curr) {
+  const patterns = [];
+  const prevDir = candleDirection(prev), currDir = candleDirection(curr), prevBody = candleBody(prev), currBody = candleBody(curr);
+  if (prevBody <= 0 || currBody <= 0) return patterns;
+  const prevOpen = Number(prev.open), prevClose = Number(prev.close), currOpen = Number(curr.open), currClose = Number(curr.close);
+  const prevBodyLow = Math.min(prevOpen, prevClose), prevBodyHigh = Math.max(prevOpen, prevClose);
+  const currBodyLow = Math.min(currOpen, currClose), currBodyHigh = Math.max(currOpen, currClose);
+  if (prevDir === "bearish" && currDir === "bullish" && currBodyLow <= prevBodyLow && currBodyHigh >= prevBodyHigh) patterns.push({ name: "Bullish Engulfing", direction: "bullish", strength: "medium", reliability: "medium", explanation: "Bullish candle body engulfs the previous bearish body." });
+  if (prevDir === "bullish" && currDir === "bearish" && currBodyLow <= prevBodyLow && currBodyHigh >= prevBodyHigh) patterns.push({ name: "Bearish Engulfing", direction: "bearish", strength: "medium", reliability: "medium", explanation: "Bearish candle body engulfs the previous bullish body." });
+  if (prevDir === "bearish" && currDir === "bullish" && currOpen < prevClose && currClose > candleMidpoint(prev) && currClose < prevOpen) patterns.push({ name: "Piercing Line", direction: "bullish", strength: "medium", reliability: "medium", explanation: "Bullish candle closes above the midpoint of the previous bearish candle." });
+  if (prevDir === "bullish" && currDir === "bearish" && currOpen > prevClose && currClose < candleMidpoint(prev) && currClose > prevOpen) patterns.push({ name: "Dark Cloud Cover", direction: "bearish", strength: "medium", reliability: "medium", explanation: "Bearish candle closes below the midpoint of the previous bullish candle." });
+  if (prevBody > 0 && currBody > 0 && currBody <= prevBody * 0.45 && currBodyLow >= prevBodyLow && currBodyHigh <= prevBodyHigh) patterns.push({ name: prevDir === "bearish" ? "Bullish Harami" : "Bearish Harami", direction: prevDir === "bearish" ? "bullish" : "bearish", strength: "weak", reliability: "low", explanation: "Small body forms inside the previous candle body." });
+  return patterns;
+}
+function detectThreeCandlePatterns(a, b, c) {
+  const patterns = [], aDir = candleDirection(a), bSmall = isSmallBody(b), cDir = candleDirection(c);
+  if (aDir === "bearish" && bSmall && cDir === "bullish" && Number(c.close) > candleMidpoint(a)) patterns.push({ name: "Morning Star-like pattern", direction: "bullish", strength: "strong", reliability: "medium", explanation: "Bearish candle, indecision candle, then bullish close above first candle midpoint." });
+  if (aDir === "bullish" && bSmall && cDir === "bearish" && Number(c.close) < candleMidpoint(a)) patterns.push({ name: "Evening Star-like pattern", direction: "bearish", strength: "strong", reliability: "medium", explanation: "Bullish candle, indecision candle, then bearish close below first candle midpoint." });
+  if (aDir === "bullish" && candleDirection(b) === "bullish" && cDir === "bullish" && Number(a.close) < Number(b.close) && Number(b.close) < Number(c.close)) patterns.push({ name: "Three White Soldiers-like pattern", direction: "bullish", strength: "strong", reliability: "medium", explanation: "Three consecutive bullish closes suggest upward pressure." });
+  if (aDir === "bearish" && candleDirection(b) === "bearish" && cDir === "bearish" && Number(a.close) > Number(b.close) && Number(b.close) > Number(c.close)) patterns.push({ name: "Three Black Crows-like pattern", direction: "bearish", strength: "strong", reliability: "medium", explanation: "Three consecutive bearish closes suggest downward pressure." });
+  return patterns;
+}
+function scoreCandlestickPatterns(patterns) {
+  const weights = { weak: 1, medium: 2, strong: 3 };
+  let score = 0;
+  for (const p of patterns || []) {
+    const w = weights[p.strength] || 1;
+    if (p.direction === "bullish") score += w;
+    if (p.direction === "bearish") score -= w;
+  }
+  if (score >= 3) return { score, bias: "bullish" };
+  if (score > 0) return { score, bias: "mild-bullish" };
+  if (score <= -3) return { score, bias: "bearish" };
+  if (score < 0) return { score, bias: "mild-bearish" };
+  return { score, bias: "neutral" };
+}
+function computeCandlestickPatternContext(candles, lookback = 5) {
+  const c = (candles || []).filter((x) => Number.isFinite(Number(x.open)) && Number.isFinite(Number(x.high)) && Number.isFinite(Number(x.low)) && Number.isFinite(Number(x.close)));
+  if (c.length < 3) return { available: false, status: "insufficient_candles", patterns: [], bias: "neutral", score: 0, guardrail: "Candlestick patterns are confirmation context only and cannot override macro/event/replay evidence." };
+  const recent = c.slice(-Math.max(3, lookback));
+  const patterns = [];
+  patterns.push(...detectSingleCandlePatterns(recent[recent.length - 1]));
+  patterns.push(...detectTwoCandlePatterns(recent[recent.length - 2], recent[recent.length - 1]));
+  patterns.push(...detectThreeCandlePatterns(recent[recent.length - 3], recent[recent.length - 2], recent[recent.length - 1]));
+  const unique = [], seen = new Set();
+  for (const p of patterns) {
+    const key = `${p.name}|${p.direction}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push({ ...p, confirmationOnly: true });
+    }
+  }
+  const scored = scoreCandlestickPatterns(unique);
+  return {
+    available: true,
+    status: unique.length ? "patterns_detected" : "no_major_pattern",
+    lookbackCandles: recent.length,
+    patterns: unique.slice(0, 5),
+    bias: scored.bias,
+    score: scored.score,
+    guardrail: "Candlestick patterns are technical confirmation context only; they are not trade instructions and cannot override macro/event/replay evidence.",
+  };
+}
+
 function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timeframe = "1h", sourceName = "yahoo") {
   const cleaned = sanitizeCandles(candles, symbol);
   const c = cleaned.candles;
@@ -3016,6 +3106,7 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
   const stochRsi14 = computeStochRsi(closes, 14, 14, 3);
   const technicalLanguageHints = buildRsiStochRsiLanguageHint(rsi14, stochRsi14);
   const { support, resistance } = estimateSupportResistance(c, 60);
+  const candlestickPatterns = computeCandlestickPatternContext(c, 5);
   const trend = classifyTrend(price, ema20, ema50, ema200);
   const momentum = classifyMomentum(rsi14, price, prevPrice);
   const priceVsEMA200 = Number.isFinite(ema200)
@@ -3175,6 +3266,7 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
           state: stochRsi14.state,
         },
         technicalLanguageHints,
+        candlestickPatterns,
         expandedIndicatorScore: round2(expandedScore),
         strategyModules,
         strategyScoreContribution: round2(strategyScoreContribution),
@@ -3193,6 +3285,7 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
       indicatorScore: round2(expandedScore),
       note: "Expanded indicators are confirmation/contradiction context only and must not override macro/event/replay evidence.",
     },
+    candlestickPatterns,
     strategyModules,
     technicalBias: bias,
     technicalConfidence,
@@ -3447,6 +3540,10 @@ function describeTechnicalForSafeReport(tech) {
   const bollingerText = tf.bollinger20 ? `Bollinger20 position=${tf.bollinger20.position}, upper=${tf.bollinger20.upper}, middle=${tf.bollinger20.middle}, lower=${tf.bollinger20.lower}, bandwidth=${tf.bollinger20.bandwidthPct}%` : "Bollinger20=not available";
   const keltnerText = tf.keltner20 ? `Keltner20 position=${tf.keltner20.position}, upper=${tf.keltner20.upper}, middle=${tf.keltner20.middle}, lower=${tf.keltner20.lower}, width=${tf.keltner20.widthPct}%` : "Keltner20=not available";
   const stochRsiText = tf.stochRsi14 ? `StochRSI14 K=${tf.stochRsi14.k}, D=${tf.stochRsi14.d}, state=${tf.stochRsi14.state}` : "StochRSI14=not available";
+  const candleContext = tech.candlestickPatterns || tf.candlestickPatterns || null;
+  const candleText = candleContext?.available
+    ? `Candlestick patterns=${candleContext.status}, bias=${candleContext.bias}, score=${candleContext.score}, names=${(candleContext.patterns || []).map((p) => p.name).join(", ") || "none"}`
+    : "Candlestick patterns=unavailable";
   const languageHint = tech.technicalLanguageHints || tf.technicalLanguageHints || null;
   const languageHintText = languageHint?.requiredPhrase
     ? `Required RSI/StochRSI wording: ${languageHint.requiredPhrase}`
@@ -3469,7 +3566,7 @@ function describeTechnicalForSafeReport(tech) {
     implication: `${bias} technical confirmation context; must not override incomplete macro/event evidence`,
     reliability: qLabel,
     usable: true,
-    section: `Technical context is available and usable only as confirmation context, not as a macro override. Selected source: ${sourceText}. Data quality: ${qLabel} with score ${qScore}. Technical bias: ${bias} with confidence ${conf}. On ${tfKey || "selected timeframe"}, trend=${trend}, momentum=${momentum}, priceVsEMA200=${priceVs}, RSI14=${rsi}, ATR14=${atr}, EMA20=${ema20}, EMA50=${ema50}, EMA200=${ema200}. Expanded indicators: ${macdText}; ${adxText}; ${bollingerText}; ${keltnerText}; ${stochRsiText}; expandedIndicatorScore=${expandedScoreText}. RSI14 and Stochastic RSI are treated separately; Stochastic RSI extremes are not described as RSI extremes. ${languageHintText} ${strategyText}. Support=${support}; resistance=${resistance}. This can confirm, weaken, or contradict macro context, but it cannot override missing FRED drivers, blank event actual/forecast values, or absent replay evidence.${mtfText}`,
+    section: `Technical context is available and usable only as confirmation context, not as a macro override. Selected source: ${sourceText}. Data quality: ${qLabel} with score ${qScore}. Technical bias: ${bias} with confidence ${conf}. On ${tfKey || "selected timeframe"}, trend=${trend}, momentum=${momentum}, priceVsEMA200=${priceVs}, RSI14=${rsi}, ATR14=${atr}, EMA20=${ema20}, EMA50=${ema50}, EMA200=${ema200}. Expanded indicators: ${macdText}; ${adxText}; ${bollingerText}; ${keltnerText}; ${stochRsiText}; expandedIndicatorScore=${expandedScoreText}. ${candleText}. RSI14 and Stochastic RSI are treated separately; Stochastic RSI extremes are not described as RSI extremes. ${languageHintText} ${strategyText}. Support=${support}; resistance=${resistance}. This can confirm, weaken, or contradict macro context, but it cannot override missing FRED drivers, blank event actual/forecast values, or absent replay evidence.${mtfText}`,
     alignment: bias,
   };
 }
@@ -3665,6 +3762,20 @@ function buildValidationSafeGoldReport(snapshot, validation) {
   const replaySignal = snapshot?.replayEvidence?.replaySignal || 'missing';
   const replayAvgQuality = snapshot?.replayEvidence?.summary?.avgQuality || 0;
   const missing = flags.missingCriticalMacroDrivers || [];
+  const macroCoverageComplete = Array.isArray(missing) && missing.length === 0 && Number(fredRows) >= 11;
+  const replayAvailable = Number(replayRecords) > 0;
+  const replayWording = replayAvailable
+    ? "Replay evidence is available but limited/inconclusive; use it only as historical market-reaction context."
+    : "Replay evidence is missing; no historical market-reaction validation is available.";
+  const macroWording = macroCoverageComplete
+    ? "Macro driver coverage is complete, but directional confidence remains capped because event actual/forecast values are missing, news is weak/rate-limited, and replay evidence is limited/inconclusive."
+    : `Macro driver coverage is incomplete; missing critical macro drivers: ${missing.length ? missing.join(", ") : "none listed"}.`;
+  const macroEvidenceState = macroCoverageComplete
+    ? "Complete FRED coverage; no critical macro drivers missing"
+    : `Partial; missing ${missing.length ? missing.join(", ") : "none listed"}`;
+  const macroMissingEvidenceText = macroCoverageComplete
+    ? "confirmed CPI/PCE outcome, event actual/forecast values, stronger live macro-relevant news, and additional high-quality replay evidence"
+    : "confirmed CPI/PCE outcome, complete real-yield and USD drivers, event actual/forecast values, stronger live macro-relevant news, and additional high-quality replay evidence";
   const maxConf = Number(flags.maxRecommendedConfidence ?? 25);
   const safeConfidence = Math.min(maxConf, techDesc.usable ? 25 : 15);
 
@@ -3687,20 +3798,20 @@ The original AI report was rejected because it failed high-severity validation. 
 
 1. Dominant research scenario
 Wait-Neutral.
-The system should not assign a bullish or bearish research scenario because macro drivers are incomplete, news strength is weak, replay evidence is missing, and event outcomes are still blank. Missing critical macro drivers: ${missing.length ? missing.join(", ") : "none listed"}. ${techDesc.usable ? "Technical context is usable only as confirmation context, not as a standalone scenario driver." : "Technical context is not usable for scenario evidence."} ${alignmentText}
+The system should not assign a bullish or bearish research scenario because event outcomes are still blank, news strength is weak, and replay evidence is limited/inconclusive. ${macroWording} ${replayWording} ${techDesc.usable ? "Technical context is usable only as confirmation context, not as a standalone scenario driver." : "Technical context is not usable for scenario evidence."} ${alignmentText}
 
 2. Confidence score
 ${safeConfidence}.
 Reason: confidence is capped because source quality is incomplete and high-severity validation errors were detected in the AI output.
-Confidence reducers: incomplete FRED coverage (${fredRows}/11 loaded), newsStrength=${safeValue(flags.newsStrength)}, macroRelevantNewsCount=${safeValue(flags.macroRelevantNewsCount, 0)}, replayRecords=${replayRecords}, replaySignal=${replaySignal}, replayAvgQuality=${replayAvgQuality}, technicalStatus=${safeValue(tech.status)}, technicalUsable=${safeValue(tech.usableForScenario)}, eventDataCompleteness=${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)}.
+Confidence reducers: FRED coverage=${fredRows}/11, macroCoverageComplete=${macroCoverageComplete}, newsStrength=${safeValue(flags.newsStrength)}, macroRelevantNewsCount=${safeValue(flags.macroRelevantNewsCount, 0)}, replayRecords=${replayRecords}, replaySignal=${replaySignal}, replayAvgQuality=${replayAvgQuality}, technicalStatus=${safeValue(tech.status)}, technicalUsable=${safeValue(tech.usableForScenario)}, eventDataCompleteness=${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)}.
 
 3. Evidence table
 | Evidence block | Current state | Gold implication | Reliability |
 |---|---|---|---|
-| Macro | Partial; missing ${missing.length ? missing.join(", ") : "none listed"} | Direction cannot be confirmed | ${safeValue(flags.macroReliability)} |
+| Macro | ${macroEvidenceState} | Direction cannot be confirmed until event actual/forecast and market reaction are available | ${safeValue(flags.macroReliability)} |
 | News | ${newsItems} item(s); newsStrength=${safeValue(flags.newsStrength)}; macroRelevantNewsCount=${safeValue(flags.macroRelevantNewsCount, 0)} | Not sufficient for directional confirmation | ${safeValue(flags.newsStrength)} |
 | Calendar/event risk | ${nextName} on ${nextDate} ${nextTime}; forecast/actual fields are missing | Conditional only | ${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)} |
-| Replay evidence | ${replayRecords} replay record(s); signal=${replaySignal}; avgQuality=${replayAvgQuality} | ${replayRecords ? 'Historical market-reaction context available, but must be compared carefully' : 'No historical validation'} | ${safeValue(flags.replayReliability)} |
+| Replay evidence | ${replayRecords} replay record(s); signal=${replaySignal}; avgQuality=${replayAvgQuality} | ${replayRecords ? 'Available but limited/inconclusive; historical context only' : 'No historical validation'} | ${safeValue(flags.replayReliability)} |
 | Technical context | ${techDesc.evidenceRowState} | ${techDesc.implication} | ${techDesc.reliability} |
 | Source/data readiness | FRED rows=${fredRows}; news items=${newsItems}; TradingEconomics/Reddit/YouTube may be missing | Limited source coverage | partial |
 
@@ -3708,18 +3819,18 @@ Confidence reducers: incomplete FRED coverage (${fredRows}/11 loaded), newsStren
 Confirmed evidence: none.
 Conditional evidence: if future labor data weakens expectations and yields/USD fall, gold may receive support; if inflation is hot while real yields fall, gold may receive support. These are conditional gates only because actual and forecast values are missing.
 Technical confirmation context: ${techDesc.usable ? technicalCaseWording(tech, "bullish") : "not usable."}
-Missing evidence: confirmed labor outcome, confirmed CPI/PCE outcome, complete real-yield and USD drivers, replay evidence, and event-time technical reaction.
+Missing evidence: ${macroMissingEvidenceText}, and event-time technical reaction.
 Invalidation conditions: if labor data strengthens expectations and yields/USD rise, or if hot inflation lifts real yields, the bullish case weakens.
 
 5. Bearish case for gold
 Confirmed evidence: none.
 Conditional evidence: if future labor data strengthens expectations and yields/USD rise, gold may face pressure; if inflation is hot and real yields rise, gold may face pressure. These are conditional gates only.
 Technical confirmation context: ${techDesc.usable ? technicalCaseWording(tech, "bearish") : "not usable."}
-Missing evidence: confirmed labor outcome, confirmed inflation outcome, complete FRED macro drivers, replay evidence, and event-time technical reaction.
+Missing evidence: ${macroMissingEvidenceText}, and event-time technical reaction.
 Invalidation conditions: if labor data weakens expectations and yields/USD fall, or if real yields fall despite hot inflation, the bearish case weakens.
 
 6. Wait/neutral case
-Wait-Neutral is the appropriate state because the snapshot lacks confirmed event outcomes, complete macro drivers, and strong macro-relevant news. Replay evidence status: ${replayRecords ? `${replayRecords} record(s), signal=${replaySignal}, avgQuality=${replayAvgQuality}` : 'missing'}. ${techDesc.usable ? "Technical context is available, but it is only confirmation context and cannot override missing macro/event evidence. " + alignmentText : "Technical context is not usable as confirmation."}
+Wait-Neutral is the appropriate state because the snapshot lacks confirmed event outcomes and strong macro-relevant news. ${macroWording} Replay evidence status: ${replayRecords ? `${replayRecords} record(s), signal=${replaySignal}, avgQuality=${replayAvgQuality}; available but limited/inconclusive` : 'missing'}. ${techDesc.usable ? "Technical context is available, but it is only confirmation context and cannot override missing macro/event evidence. " + alignmentText : "Technical context is not usable as confirmation."}
 
 7. Technical confirmation
 ${techDesc.section}
@@ -3738,7 +3849,7 @@ After: compare actual event outcome and market reaction in USD/yields/gold, then
 Avoid-window: ${avoidWindow}.
 
 10. Final research note
-This report remains Wait-Neutral because the evidence base is incomplete and the rejected AI output contained validation failures. ${techDesc.usable ? "Technical context is available as confirmation context, but directional bias remains blocked until macro drivers, event outcomes, and replay evidence improve." : "Directional bias should remain blocked until macro drivers, event outcomes, replay evidence, and usable technical context improve."} <END_GOLDSCOPE_REPORT>
+This report remains Wait-Neutral because event outcomes are still blank, news is weak/rate-limited, replay evidence is limited/inconclusive, and the rejected AI output contained validation failures. ${techDesc.usable ? "Technical context is available as confirmation context, but directional bias remains blocked until event outcomes, market reaction, and replay evidence quality improve." : "Directional bias should remain blocked until event outcomes, market reaction, replay evidence quality, and usable technical context improve."} <END_GOLDSCOPE_REPORT>
 
 REJECTED AI OUTPUT VALIDATION
 This section explains why the raw AI response was rejected. It is not an error in the safe report.
@@ -3756,15 +3867,20 @@ function collectTechnicalStochRsiValues(snapshot) {
 }
 
 
+function maskStochasticRsiForClassicRsiParsing(reportText) {
+  return String(reportText || "")
+    .replace(/\bStoch(?:astic)?\s*RSI(?:14)?\s*(?:K|D)?\s*(?:=|:|is|was|reads?|at)?\s*[0-9]{1,3}(?:\.[0-9]+)?/gi, "STOCH_RSI_VALUE_MASKED")
+    .replace(/\bStoch(?:astic)?\s*RSI(?:14)?\b/gi, "STOCH_RSI_MASKED");
+}
+
 function collectMentionedRsiNumbers(reportText) {
-  const s = String(reportText || "");
+  const s = maskStochasticRsiForClassicRsiParsing(reportText);
   const values = [];
 
-  // Context-isolated RSI numeric parser.
+  // Context-isolated classic RSI numeric parser.
   //
-  // This deliberately captures ONLY tight, direct RSI measurements.
-  // It does NOT scan a wide before/after context because that can incorrectly
-  // attach unrelated numbers such as news confidence=65 to nearby RSI words.
+  // Captures ONLY tight, direct RSI measurements and excludes Stochastic RSI.
+  // Stochastic RSI is validated separately by the StochRSI validator.
   //
   // Valid measured-value examples:
   //   RSI14=43.61
@@ -3775,13 +3891,11 @@ function collectMentionedRsiNumbers(reportText) {
   //   RSI at 43.61
   //
   // Invalid/non-value examples:
-  //   RSI14
+  //   Stochastic RSI is overbought (85)
   //   RSI below 30
   //   RSI < 30
   //   RSI above 70
-  //   RSI > 70
   //   news confidence 65
-  //   confidence=65
   const patterns = [
     /\bRSI(?:14)?\s*(?:=|:)\s*([0-9]{1,3}(?:\.[0-9]+)?)/gi,
     /\bRSI(?:14)?\s+(?:is|was|reads?|at)\s+([0-9]{1,3}(?:\.[0-9]+)?)/gi,
@@ -3795,6 +3909,7 @@ function collectMentionedRsiNumbers(reportText) {
       // Reject threshold/comparator phrases even if they accidentally match future wording.
       if (/\b(?:below|under|less than|<|above|over|greater than|>)\b/i.test(full)) continue;
       if (/\b(?:threshold|level|classic|overbought|oversold)\b/i.test(full)) continue;
+      if (/STOCH_RSI/i.test(full)) continue;
 
       const n = Number(m[1]);
       if (Number.isFinite(n) && n >= 0 && n <= 100) {
@@ -3807,7 +3922,15 @@ function collectMentionedRsiNumbers(reportText) {
 }
 
 function rsiMentionMatchesSnapshot(value, snapshotRsiValues) {
-  return snapshotRsiValues.some((r) => Math.abs(Number(r) - Number(value)) <= 0.75);
+  const mentioned = Number(value);
+  if (!Number.isFinite(mentioned)) return true;
+
+  // v2.37.2: allow integer rounded RSI mentions.
+  // Example: AI says RSI14: 28 and snapshot has 28.99 -> acceptable.
+  const isIntegerMention = Number.isInteger(mentioned);
+  const tolerance = isIntegerMention ? 1.0 : 0.15;
+
+  return snapshotRsiValues.some((r) => Math.abs(Number(r) - mentioned) <= tolerance);
 }
 
 function mentionsAlignmentActionAsStrategyModule(reportText, snapshot) {
@@ -4294,6 +4417,22 @@ function validateAiGoldReport(output, snapshot) {
       severity: "high",
       code: "technical_confirmed_evidence_error",
       message: "AI placed technical context or technical indicators under Confirmed evidence, including markdown-formatted evidence labels. Technicals are confirmation/contradiction context only.",
+    });
+  }
+
+  if (/Confirmed evidence\s*(?:\*\*)?\s*:?[^\n]{0,260}\b(?:candlestick|Doji|Hammer|Engulfing|Morning Star|Evening Star|Shooting Star|Harami)\b/i.test(text)) {
+    issues.push({
+      severity: "high",
+      code: "candlestick_confirmed_evidence_error",
+      message: "AI placed candlestick patterns under Confirmed evidence. Candlestick patterns are technical confirmation context only.",
+    });
+  }
+
+  if (/\b(?:candlestick|Doji|Hammer|Engulfing|Morning Star|Evening Star|Shooting Star|Harami)\b[\s\S]{0,180}\b(?:will|guarantees?|confirms? a move|proves?|trade signal|entry|exit)\b/i.test(text)) {
+    issues.push({
+      severity: "medium",
+      code: "candlestick_prediction_overclaim",
+      message: "AI used candlestick patterns as predictive or trade-signal language. They are confirmation context only.",
     });
   }
 
@@ -7860,6 +7999,7 @@ export default function App() {
     const [outputDepth, setOutputDepth] = useState("standard");
 
     const OLLAMA_PROXY = "/api/ollama";
+const USE_THINKING_STOP_TOKENS = false; // v2.37.1: optional; keep false to avoid blank/truncated outputs when a model starts with <think>.
 
     const input = {
       width: "100%",
@@ -8764,7 +8904,7 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.40.16.2",
+        appVersion: "GoldScope v2.37.2.2",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -8839,6 +8979,8 @@ function buildGoldScopeContextSnapshot() {
 - nextMajor = "${nextEvent}" on ${nextDate} | eventData.quality = "${eventQuality}"
 - newsStrength = "${newsStrength}"
 - maxRecommendedConfidence = ${maxConf}
+- technical source note: if technicalContext.sourceName is Yahoo and symbol is GC=F, all price levels are gold futures proxy levels, not exact spot XAUUSD levels.
+- thinking stop tokens enabled = ${USE_THINKING_STOP_TOKENS}
 ${mustBeWaitNeutral ? `HARD RULE — YOU MUST OUTPUT WAIT-NEUTRAL:
 All conditions are met: deterministic dominant is Wait/neutral, replayRecords=0, eventData=date-only, and missing critical macro drivers exist.
 Section 1 MUST be "Wait-Neutral". Do not select Bullish or Bearish.
@@ -8874,7 +9016,7 @@ STRICT SOURCE RULES:
 15. Instrument guard: do not treat mining-company stocks, ETF/company shares, OTCMKTS items, or retail gold-rate articles as spot gold/XAUUSD movement.
 16. Do not mention specific price levels, support, resistance, breakout, breakdown, or "recover above/below" unless spotPrice or technicalContext exists in the snapshot.
 17. If technicalContext exists, use it only as market-confirmation context. It must not override missing macro/event evidence.
-18. If technicalContext uses GC=F, state that it is a gold futures proxy for XAUUSD, not direct spot XAUUSD.
+18. If technicalContext uses GC=F, state that it is a gold futures proxy for XAUUSD, not direct spot XAUUSD. Do not present GC=F support/resistance, EMA, or price levels as exact spot XAUUSD levels.
 19. If technicalContext.status is "unreliable" or technicalContext.usableForScenario is false, do not use it as directional evidence; describe it only as a failed/diagnostic technical read.
 20. Do not describe EMA20 below EMA200 as bullish. Price above EMA200 alone is only mild support and can be contradicted by EMA alignment or overbought RSI.
 21. If technicalContext.usableForScenario is false, do not mention mild-bullish, mild-bearish, RSI, EMA, ATR, support, resistance, or priceVsEMA200 as scenario evidence unless those fields are explicitly present in the masked technicalContext.
@@ -8887,10 +9029,12 @@ STRICT SOURCE RULES:
 26b. Do not call RSI overbought unless an RSI14 value is > 70. Do not call RSI oversold unless an RSI14 value is < 30.
 26c. If RSI14 is between 30 and 70 but Stochastic RSI is at an extreme, say: "RSI is not at a classic extreme, while Stochastic RSI shows short-term overextension/exhaustion." 
 27. If technicalContext.strategyModules exists, summarize Trend, Momentum, Volatility, and Structure modules as technical confirmation/contradiction context only. Do not treat strategy modules as trade instructions or confirmed macro evidence.
+27a. If technicalContext.candlestickPatterns exists, summarize detected candlestick pattern names, direction, and bias as technical confirmation context only. Do not treat candlestick patterns as confirmed evidence or trade signals.
 28. If technicalLanguageHints.requiredPhrase exists, copy it exactly in the Technical confirmation section. Do not paraphrase it.
 29. Technical context must never be written under "Confirmed evidence"; use "Technical confirmation context" instead.
 30. Do not write definitive RSI extreme claims unless supported by RSI14 values. Soft wording such as "near overbought" must not be converted into a definitive extreme claim.
 31. When macroGateLanguageHints exists, copy these gates exactly in the Decision gates section. Do not paraphrase them, invert them, or convert weak-labor/falling-yields into bearish language.
+32. Use SYSTEM STATE SUMMARY as the primary instruction anchor. If SYSTEM STATE SUMMARY and raw JSON appear to conflict, follow SYSTEM STATE SUMMARY and validation guardrails.
 25. If replayEvidence.count > 0, summarize latest and recent replay reaction patterns. Treat replay as evidence only when qualityScore is adequate and event context is comparable.
 
 MACRO LOGIC GUARD:
@@ -9000,7 +9144,7 @@ Use this table. In the News row, explicitly mention contextQualityFlags.newsStre
 - Identify exactly what evidence is missing.
 
 7. Technical confirmation
-- If technicalContext is available, summarize trend, EMA alignment, RSI14, ATR14, support/resistance, technicalBias, expanded indicators, and strategyModules.
+- If technicalContext is available, summarize trend, EMA alignment, RSI14, ATR14, support/resistance, technicalBias, expanded indicators, candlestickPatterns, and strategyModules.
 - Keep RSI14 and Stochastic RSI wording separate. Example: "RSI14 is not at a classic extreme; Stochastic RSI is overbought." Do not write "RSI is overbought" unless RSI14 > 70.
 - If technicalLanguageHints.requiredPhrase exists, copy it exactly in this section.
 - If technicalContext.status is unreliable or usableForScenario is false, say it is unreliable/masked and do not use it as directional evidence.
@@ -9110,6 +9254,7 @@ Do not invent numeric thresholds.
             temperature: 0.1,
             num_predict: numPredict,
             repeat_penalty: 1.1,
+            ...(USE_THINKING_STOP_TOKENS ? { stop: ["<think>", "<thinking>"] } : {}),
           },
         };
 
@@ -9273,7 +9418,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.16.2",
+        appVersion: "GoldScope v2.37.2.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -9422,6 +9567,9 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Thinking artifact retry-once: on</Badge>
               <Badge value="supportive">Thinking helper scope hotfix: on</Badge>
               <Badge value="supportive">Bare RSI extreme validator: on</Badge>
+              <Badge value="supportive">Candlestick pattern layer: on</Badge>
+              <Badge value="supportive">Prompt runtime reliability: on</Badge>
+              <Badge value="supportive">Safe report evidence wording: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -9448,6 +9596,9 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Hard Wait-Neutral prompt anchor: on</Badge>
               <Badge value="supportive">Local thinking cleaners: on</Badge>
               <Badge value="supportive">StochRSI exclusion preserved: on</Badge>
+              <Badge value="supportive">Candlestick confirmation-only: on</Badge>
+              <Badge value="supportive">Optional think stop tokens: off</Badge>
+              <Badge value="supportive">RSI parser cleanup: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
@@ -9492,6 +9643,9 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Thinking artifact retry-once: on</Badge>
               <Badge value="supportive">Thinking helper scope hotfix: on</Badge>
               <Badge value="supportive">Bare RSI extreme validator: on</Badge>
+              <Badge value="supportive">Candlestick pattern layer: on</Badge>
+              <Badge value="supportive">Prompt runtime reliability: on</Badge>
+              <Badge value="supportive">Safe report evidence wording: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -9518,6 +9672,9 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Hard Wait-Neutral prompt anchor: on</Badge>
               <Badge value="supportive">Local thinking cleaners: on</Badge>
               <Badge value="supportive">StochRSI exclusion preserved: on</Badge>
+              <Badge value="supportive">Candlestick confirmation-only: on</Badge>
+              <Badge value="supportive">Optional think stop tokens: off</Badge>
+              <Badge value="supportive">RSI parser cleanup: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
@@ -9604,7 +9761,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.16.2",
+        appVersion: "GoldScope v2.37.2.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -9807,7 +9964,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.40.16.2",
+        appVersion: "GoldScope v2.37.2.2",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -10101,7 +10258,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.40.16.2</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.37.2.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>

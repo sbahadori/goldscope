@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.40.16 - Bare RSI Extreme Phrase Validator
+title GoldScope v2.37.2 - Safe Report Evidence Wording + RSI Numeric Parser Cleanup
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.40.16 - Bare RSI Extreme Phrase Validator
+echo   GoldScope v2.37.2 - Safe Report Evidence Wording + RSI Numeric Parser Cleanup
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.
