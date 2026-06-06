@@ -9487,7 +9487,7 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.41.1.10",
+        appVersion: "GoldScope v2.41.1.11",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -10503,6 +10503,149 @@ function forceGlobalTechnicalConfirmedEvidenceRelabel(reportText, snapshot) {
 }
 
 
+
+function enforceExactNextCatalystName(reportText, snapshot) {
+  let text = String(reportText || "");
+  const nextName =
+    snapshot?.deterministicScenarioLab?.nextMajor?.name ||
+    snapshot?.calendar?.nextMajor?.name ||
+    "";
+  if (!nextName) return { text, applied: false };
+
+  const bounds = extractNumberedSectionBoundaries(text, 9, 10, "Next catalyst plan");
+  if (!bounds) return { text, applied: false };
+
+  let section = bounds.section;
+  const exactLine = `Next event: ${nextName}.`;
+
+  // Replace common next-event line variants, including markdown bold and extra "(nextMajor event)".
+  if (/^\s*(?:[-*]\s*)?(?:\*{0,2})?\s*Next event(?:\s+to\s+watch)?(?:\*{0,2})?\s*:/im.test(section)) {
+    section = section.replace(
+      /^\s*(?:[-*]\s*)?(?:\*{0,2})?\s*Next event(?:\s+to\s+watch)?(?:\*{0,2})?\s*:[^\n]*/im,
+      exactLine
+    );
+  } else {
+    section = section.replace(/(\n9\.\s*Next catalyst plan[^\n]*\n?)/i, `$1${exactLine}\n`);
+  }
+
+  // Remove leftover aliases if any survived elsewhere in Section 9.
+  section = section
+    .replace(/\s*\(nextMajor event\)/gi, "")
+    .replace(/\bnextMajor event\b/gi, nextName)
+    .replace(/\bupcoming CPI\b/gi, nextName)
+    .replace(/\bpending CPI\b/gi, nextName);
+
+  return {
+    text: bounds.before + section + bounds.after,
+    applied: section !== bounds.section,
+  };
+}
+
+function cleanupMacroCoverageWording(reportText, snapshot) {
+  let text = String(reportText || "");
+  const missing = snapshot?.contextQualityFlags?.missingCriticalMacroDrivers || [];
+  if (missing.length > 0) return { text, applied: false };
+
+  const changes = [];
+  const replacement = "Macro coverage is complete, but directional confidence remains capped because event actual/forecast values and confirmation evidence are incomplete";
+
+  const patterns = [
+    /\bmissing critical macro drivers\b/gi,
+    /\bmacro drivers lack critical data\b/gi,
+    /\bmissing macro drivers\b/gi,
+    /\bmacro data incomplete\b/gi,
+    /\bmacro gaps\b/gi,
+  ];
+
+  for (const re of patterns) {
+    if (re.test(text)) {
+      text = text.replace(re, replacement);
+      changes.push("missing_macro_drivers_wording_replaced");
+    }
+  }
+
+  // Clean awkward duplicates caused by replacement inside longer clauses.
+  text = text
+    .replace(/because\s+Macro coverage is complete,/gi, "because macro coverage is complete,")
+    .replace(/Confidence reducers:\s*Macro coverage is complete,/gi, "Confidence reducers: macro coverage is complete,")
+    .replace(/,\s*and\s+Macro coverage is complete,/gi, "; macro coverage is complete,")
+    .replace(/\.\s*Macro coverage is complete, but directional confidence remains capped because event actual\/forecast values and confirmation evidence are incomplete, leading to a neutral stance\./gi,
+      ". Macro coverage is complete, but directional confidence remains capped because event actual/forecast values and confirmation evidence are incomplete.");
+
+  return {
+    text,
+    applied: changes.length > 0,
+    changes: [...new Set(changes)],
+  };
+}
+
+function cleanupPredictiveTechnicalTableImplications(reportText) {
+  let text = String(reportText || "");
+  const changes = [];
+
+  const technicalRowRe = /\n\|\s*Technical context\s*\|([^\n]*)/i;
+  const m = text.match(technicalRowRe);
+  if (!m) return { text, applied: false };
+
+  const row = m[0];
+  const cells = row.split("|");
+  // table row shape: ["\n", " Technical context ", " state ", " implication ", " reliability ", ""]
+  if (cells.length >= 5) {
+    const implication = cells[3] || "";
+    const predictive =
+      /\blikely to\b/i.test(implication) ||
+      /\bmay test\b/i.test(implication) ||
+      /\bmay break\b/i.test(implication) ||
+      /\bbreakout\b/i.test(implication) ||
+      /\bbreakdown\b/i.test(implication) ||
+      /\btest resistance\b/i.test(implication) ||
+      /\btest support\b/i.test(implication);
+
+    if (predictive) {
+      cells[3] = " Technical confirmation context only; cannot override macro/event uncertainty ";
+      const newRow = cells.join("|");
+      text = text.replace(row, newRow);
+      changes.push("technical_table_predictive_implication_replaced");
+    }
+  }
+
+  return {
+    text,
+    applied: changes.length > 0,
+    changes,
+  };
+}
+
+function applyNextCatalystMacroCoverageCleanup(reportText, snapshot) {
+  let text = String(reportText || "");
+  const changes = [];
+
+  const nextEvent = enforceExactNextCatalystName(text, snapshot);
+  if (nextEvent.applied) {
+    text = nextEvent.text;
+    changes.push("next_event_exact_name_enforced");
+  }
+
+  const macroCoverage = cleanupMacroCoverageWording(text, snapshot);
+  if (macroCoverage.applied) {
+    text = macroCoverage.text;
+    changes.push(...macroCoverage.changes);
+  }
+
+  const techTable = cleanupPredictiveTechnicalTableImplications(text);
+  if (techTable.applied) {
+    text = techTable.text;
+    changes.push(...techTable.changes);
+  }
+
+  return {
+    output: text,
+    anyApplied: changes.length > 0,
+    changes: [...new Set(changes)],
+  };
+}
+
+
 function applyPostProcessedOutputCleanup(reportText, snapshot) {
   let text = String(reportText || "");
   const changes = [];
@@ -10529,6 +10672,12 @@ function applyPostProcessedOutputCleanup(reportText, snapshot) {
   if (bearishTechSupport.applied) {
     text = bearishTechSupport.text;
     changes.push("bearish_case_technical_support_inserted");
+  }
+
+  const nextCatalystMacroCleanup = applyNextCatalystMacroCoverageCleanup(text, snapshot);
+  if (nextCatalystMacroCleanup.anyApplied) {
+    text = nextCatalystMacroCleanup.output;
+    changes.push(...nextCatalystMacroCleanup.changes.map((x) => `next_catalyst_macro_cleanup:${x}`));
   }
 
   const avoid = enforceExactAvoidWindowInSection9(text, snapshot);
@@ -10974,7 +11123,8 @@ ${JSON.stringify(data, null, 2)}`);
             const finalConfirmedEvidenceSafety = forceRelabelRemainingTechnicalConfirmedEvidence(cleanupPostProcessed.output, snapshotForValidation);
             const section7PostProcessed = replaceSection7WithDeterministicTechnicalConfirmation(finalConfirmedEvidenceSafety.text, snapshotForValidation);
             const maskedTechnicalSanitized = sanitizeMaskedTechnicalLeaks(section7PostProcessed, snapshotForValidation);
-            const globalTechnicalConfirmedRelabel = forceGlobalTechnicalConfirmedEvidenceRelabel(maskedTechnicalSanitized.output, snapshotForValidation);
+            const finalNextCatalystMacroCleanup = applyNextCatalystMacroCoverageCleanup(maskedTechnicalSanitized.output, snapshotForValidation);
+            const globalTechnicalConfirmedRelabel = forceGlobalTechnicalConfirmedEvidenceRelabel(finalNextCatalystMacroCleanup.output, snapshotForValidation);
             const outputForValidation = globalTechnicalConfirmedRelabel.output;
             const validation = validateAiGoldReport(outputForValidation, snapshotForValidation);
             const validationText = formatValidationReport(validation);
@@ -11001,6 +11151,9 @@ ${JSON.stringify(data, null, 2)}`);
               const maskedTechnicalSanitizerNote = maskedTechnicalSanitized.anyApplied
                 ? `\n\n---\nMASKED TECHNICAL LEAK SANITIZER\nApplied changes: ${maskedTechnicalSanitized.changes.join(", ")}. Technical claims were removed because technicalContext was masked/unusable for scenario analysis.`
                 : "";
+              const finalNextCatalystMacroCleanupNote = finalNextCatalystMacroCleanup.anyApplied
+                ? `\n\n---\nNEXT CATALYST + MACRO COVERAGE CLEANUP\nApplied changes: ${finalNextCatalystMacroCleanup.changes.join(", ")}. Next event name, complete-macro-coverage wording, and predictive technical table wording were cleaned before validation.`
+                : "";
               const globalTechnicalConfirmedRelabelNote = globalTechnicalConfirmedRelabel.anyApplied
                 ? `\n\n---\nGLOBAL TECHNICAL CONFIRMED-EVIDENCE RELABEL\nApplied changes: ${globalTechnicalConfirmedRelabel.changes.join(", ")}. Any remaining technical Confirmed evidence labels were converted before validation.`
                 : "";
@@ -11008,8 +11161,8 @@ ${JSON.stringify(data, null, 2)}`);
                 ? `\n\n---\nRAW AI TECHNICAL LANGUAGE SANITIZER\nApplied technical-language cleanup only: ${sanitized.changes.join(", ")}. Macro/event logic was not changed.`
                 : "";
               const decorated = validation.issues.length
-                ? `${outputForValidation}${section7Note}${scenarioPostProcessingNote}${cleanupPostProcessingNote}${finalConfirmedEvidenceSafetyNote}${maskedTechnicalSanitizerNote}${globalTechnicalConfirmedRelabelNote}${sanitizerNote}\n\n---\n${validationText}`
-                : `${outputForValidation}${section7Note}${scenarioPostProcessingNote}${cleanupPostProcessingNote}${finalConfirmedEvidenceSafetyNote}${maskedTechnicalSanitizerNote}${globalTechnicalConfirmedRelabelNote}${sanitizerNote}`;
+                ? `${outputForValidation}${section7Note}${scenarioPostProcessingNote}${cleanupPostProcessingNote}${finalConfirmedEvidenceSafetyNote}${maskedTechnicalSanitizerNote}${finalNextCatalystMacroCleanupNote}${globalTechnicalConfirmedRelabelNote}${sanitizerNote}\n\n---\n${validationText}`
+                : `${outputForValidation}${section7Note}${scenarioPostProcessingNote}${cleanupPostProcessingNote}${finalConfirmedEvidenceSafetyNote}${maskedTechnicalSanitizerNote}${finalNextCatalystMacroCleanupNote}${globalTechnicalConfirmedRelabelNote}${sanitizerNote}`;
               setAiOutput(decorated);
               setAiStatus(validation.ok
                 ? (outputForValidation.includes("<END_GOLDSCOPE_REPORT>") ? "complete + validation passed" : "complete, but end marker missing")
@@ -11059,7 +11212,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.1.10.2",
+        appVersion: "GoldScope v2.41.1.11.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -11210,7 +11363,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Bare RSI extreme validator: on</Badge>
               <Badge value="supportive">Candlestick pattern layer: on</Badge>
               <Badge value="supportive">Prompt runtime reliability: on</Badge>
-              <Badge value="supportive">Safe report evidence wording: on</Badge>\n              <Badge value="supportive">Comparator exclusion: on</Badge>\n              <Badge value="supportive">Replay signal normalization: on</Badge>\n              <Badge value="supportive">Technical numeric grounding: on</Badge>\n              <Badge value="supportive">Deterministic technical section: on</Badge>\n              <Badge value="supportive">Section 7 post-processor: on</Badge>\n              <Badge value="supportive">Scenario header post-processor: on</Badge>\n              <Badge value="supportive">Employment event intelligence: on</Badge>\n              <Badge value="supportive">FRED employment backfill: on</Badge>\n              <Badge value="supportive">Employment-aware Safe Report: on</Badge>\n              <Badge value="supportive">Safe Report init-order fix: on</Badge>\n              <Badge value="supportive">Output cleanup post-processor: on</Badge>\n              <Badge value="supportive">Bold-colon evidence relabel: on</Badge>\n              <Badge value="supportive">Macro confirmed-evidence downgrade: on</Badge>\n              <Badge value="supportive">Final confirmed-evidence safety pass: on</Badge>\n              <Badge value="supportive">NFP invalidation direction guard: on</Badge>\n              <Badge value="supportive">Masked technical leak sanitizer: on</Badge>\n              <Badge value="supportive">Bearish-case technical wording fix: on</Badge>\n              <Badge value="supportive">Global technical confirmed-evidence relabel: on</Badge>
+              <Badge value="supportive">Safe report evidence wording: on</Badge>\n              <Badge value="supportive">Comparator exclusion: on</Badge>\n              <Badge value="supportive">Replay signal normalization: on</Badge>\n              <Badge value="supportive">Technical numeric grounding: on</Badge>\n              <Badge value="supportive">Deterministic technical section: on</Badge>\n              <Badge value="supportive">Section 7 post-processor: on</Badge>\n              <Badge value="supportive">Scenario header post-processor: on</Badge>\n              <Badge value="supportive">Employment event intelligence: on</Badge>\n              <Badge value="supportive">FRED employment backfill: on</Badge>\n              <Badge value="supportive">Employment-aware Safe Report: on</Badge>\n              <Badge value="supportive">Safe Report init-order fix: on</Badge>\n              <Badge value="supportive">Output cleanup post-processor: on</Badge>\n              <Badge value="supportive">Bold-colon evidence relabel: on</Badge>\n              <Badge value="supportive">Macro confirmed-evidence downgrade: on</Badge>\n              <Badge value="supportive">Final confirmed-evidence safety pass: on</Badge>\n              <Badge value="supportive">NFP invalidation direction guard: on</Badge>\n              <Badge value="supportive">Masked technical leak sanitizer: on</Badge>\n              <Badge value="supportive">Bearish-case technical wording fix: on</Badge>\n              <Badge value="supportive">Global technical confirmed-evidence relabel: on</Badge>\n              <Badge value="supportive">Next catalyst exact-name cleanup: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -11286,7 +11439,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Bare RSI extreme validator: on</Badge>
               <Badge value="supportive">Candlestick pattern layer: on</Badge>
               <Badge value="supportive">Prompt runtime reliability: on</Badge>
-              <Badge value="supportive">Safe report evidence wording: on</Badge>\n              <Badge value="supportive">Comparator exclusion: on</Badge>\n              <Badge value="supportive">Replay signal normalization: on</Badge>\n              <Badge value="supportive">Technical numeric grounding: on</Badge>\n              <Badge value="supportive">Deterministic technical section: on</Badge>\n              <Badge value="supportive">Section 7 post-processor: on</Badge>\n              <Badge value="supportive">Scenario header post-processor: on</Badge>\n              <Badge value="supportive">Employment event intelligence: on</Badge>\n              <Badge value="supportive">FRED employment backfill: on</Badge>\n              <Badge value="supportive">Employment-aware Safe Report: on</Badge>\n              <Badge value="supportive">Safe Report init-order fix: on</Badge>\n              <Badge value="supportive">Output cleanup post-processor: on</Badge>\n              <Badge value="supportive">Bold-colon evidence relabel: on</Badge>\n              <Badge value="supportive">Macro confirmed-evidence downgrade: on</Badge>\n              <Badge value="supportive">Final confirmed-evidence safety pass: on</Badge>\n              <Badge value="supportive">NFP invalidation direction guard: on</Badge>\n              <Badge value="supportive">Masked technical leak sanitizer: on</Badge>\n              <Badge value="supportive">Bearish-case technical wording fix: on</Badge>\n              <Badge value="supportive">Global technical confirmed-evidence relabel: on</Badge>
+              <Badge value="supportive">Safe report evidence wording: on</Badge>\n              <Badge value="supportive">Comparator exclusion: on</Badge>\n              <Badge value="supportive">Replay signal normalization: on</Badge>\n              <Badge value="supportive">Technical numeric grounding: on</Badge>\n              <Badge value="supportive">Deterministic technical section: on</Badge>\n              <Badge value="supportive">Section 7 post-processor: on</Badge>\n              <Badge value="supportive">Scenario header post-processor: on</Badge>\n              <Badge value="supportive">Employment event intelligence: on</Badge>\n              <Badge value="supportive">FRED employment backfill: on</Badge>\n              <Badge value="supportive">Employment-aware Safe Report: on</Badge>\n              <Badge value="supportive">Safe Report init-order fix: on</Badge>\n              <Badge value="supportive">Output cleanup post-processor: on</Badge>\n              <Badge value="supportive">Bold-colon evidence relabel: on</Badge>\n              <Badge value="supportive">Macro confirmed-evidence downgrade: on</Badge>\n              <Badge value="supportive">Final confirmed-evidence safety pass: on</Badge>\n              <Badge value="supportive">NFP invalidation direction guard: on</Badge>\n              <Badge value="supportive">Masked technical leak sanitizer: on</Badge>\n              <Badge value="supportive">Bearish-case technical wording fix: on</Badge>\n              <Badge value="supportive">Global technical confirmed-evidence relabel: on</Badge>\n              <Badge value="supportive">Next catalyst exact-name cleanup: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -11402,7 +11555,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.1.10.2",
+        appVersion: "GoldScope v2.41.1.11.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -11605,7 +11758,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.1.10.2",
+        appVersion: "GoldScope v2.41.1.11.2",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -11899,7 +12052,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.1.10.2</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.1.11.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>

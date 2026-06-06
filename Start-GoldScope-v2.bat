@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.41.1.10 - Global Technical Confirmed Evidence Relabel
+title GoldScope v2.41.1.11 - Next Catalyst Exact Name + Macro Coverage Wording Cleanup
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.41.1.10 - Global Technical Confirmed Evidence Relabel
+echo   GoldScope v2.41.1.11 - Next Catalyst Exact Name + Macro Coverage Wording Cleanup
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.
