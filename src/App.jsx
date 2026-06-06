@@ -3793,18 +3793,18 @@ function buildValidationSafeGoldReport(snapshot, validation) {
   // v2.41.1.2 initialization-order fix:
   // employment/event wording must be defined before macroWording uses eventEvidenceWording.
   const employmentEvent = snapshot?.employmentEvent || {};
-  const employmentPartialFredBackfill = employmentEvent?.status === "partial_fred_backfill";
+  const employmentPartialFredBackfill = ["partial_fred_backfill", "fred_actual_calendar_forecast_previous", "calendar_forecast_previous_imported"].includes(employmentEvent?.status);
   const employmentHeadline = employmentEvent?.headline || {};
   const employmentDetails = employmentEvent?.details || {};
   const employmentQuality = employmentEvent?.quality || {};
   const employmentSafeText = employmentPartialFredBackfill
-    ? `Prior Employment Situation event is partially available from FRED: PAYEMS actual=${employmentHeadline.actual || "missing"} from ${employmentHeadline.actualSource || "FRED PAYEMS fallback"}; UNRATE=${employmentDetails.unemploymentRate || "missing"} from ${employmentDetails.unemploymentRateSource || "FRED UNRATE fallback"}. Forecast, previous, wage data, and sector composition are still missing, so surpriseDirection=${employmentHeadline.surpriseDirection || "forecast_missing"} and goldImpact=${employmentQuality.goldImpact || "wait_for_confirmation"}.`
+    ? `Prior Employment Situation event is available through mixed sources: PAYEMS actual=${employmentHeadline.actual || "missing"} from ${employmentHeadline.actualSource || "FRED PAYEMS fallback"}; forecast=${employmentHeadline.forecast || "missing"} from ${employmentHeadline.forecastSource || "calendar/provider"}; previous=${employmentHeadline.previous || "missing"} from ${employmentHeadline.previousSource || "calendar/provider"}; UNRATE=${employmentDetails.unemploymentRate || "missing"} from ${employmentDetails.unemploymentRateSource || "FRED UNRATE fallback"}. surpriseK=${employmentHeadline.surpriseK ?? "unknown"}, surpriseDirection=${employmentHeadline.surpriseDirection || "unknown"}, previousDeltaK=${employmentHeadline.previousDeltaK ?? "unknown"}, previousComparison=${employmentHeadline.previousComparison || "unknown"}. Wage data and sector composition are still missing/not verified, so goldImpact=${employmentQuality.goldImpact || "wait_for_confirmation"} remains conditional.`
     : "";
   const eventEvidenceWording = employmentPartialFredBackfill
-    ? "Next CPI actual/forecast values are missing; prior Employment event actual is partially available from FRED, but forecast/previous/sector composition are missing, so labor surprise and labor-quality cannot be confirmed"
+    ? "Next CPI actual/forecast values are missing; prior Employment event has actual/forecast/previous context, but wage data, sector composition, USD/yields confirmation, and replay alignment are still incomplete"
     : "event actual/forecast values are missing";
   const employmentEvidenceRow = employmentPartialFredBackfill
-    ? `| Employment event intelligence | PAYEMS actual=${employmentHeadline.actual || "missing"} from ${employmentHeadline.actualSource || "FRED PAYEMS fallback"}; UNRATE=${employmentDetails.unemploymentRate || "missing"} from ${employmentDetails.unemploymentRateSource || "FRED UNRATE fallback"}; forecast/previous/sector composition missing | ${employmentQuality.goldImpact || "wait_for_confirmation"}; labor surprise cannot be calculated without forecast | partial_fred_backfill |`
+    ? buildEmploymentEventReportRow(snapshot)
     : "";
 
   const macroWording = macroCoverageComplete
@@ -5432,6 +5432,16 @@ export default function App() {
       previous: values.previous || "",
       forecast: values.forecast || "",
       actual: values.actual || "",
+      forecastPreviousImport: getCalendarForecastPreviousImport(event) && (values.previous || values.forecast)
+        ? {
+            source: getCalendarForecastPreviousImport(event)?.source || "Calendar forecast/previous import",
+            provider: getCalendarForecastPreviousImport(event)?.provider || "",
+            importedAt: getCalendarForecastPreviousImport(event)?.importedAt || "",
+            confidence: getCalendarForecastPreviousImport(event)?.confidence || "manual_provider_enrichment",
+            usedForecast: Boolean(values.forecast),
+            usedPrevious: Boolean(values.previous),
+          }
+        : null,
       surprise: values.surprise || "auto",
       unemploymentRate: values.unemploymentRate || "",
       averageHourlyEarningsMoM: values.averageHourlyEarningsMoM || "",
@@ -6523,6 +6533,7 @@ export default function App() {
     const selectedRaw = calendarEvents.find((e) => e.id === selectedId) || highImpactEvents[0] || calendarEvents[0];
     const selected = selectedRaw ? getEnrichedEvent(selectedRaw) : null;
     const saved = selected ? getEventResult(selected.id) : null;
+    const calendarForecastPreviousImport = selected ? getCalendarForecastPreviousImport(selected) : null;
 
     const [form, setForm] = useState({
       previous: "",
@@ -6569,6 +6580,17 @@ export default function App() {
       if (!selected) return;
       saveEventResult(selected, form);
       setReplayStatus(`event result saved; rerun Event Replay for ${selected.name}`);
+    }
+
+    function applyCalendarForecastPreviousImport() {
+      if (!selected || !calendarForecastPreviousImport) return;
+      setForm((prev) => ({
+        ...prev,
+        forecast: prev.forecast || calendarForecastPreviousImport.forecast || "",
+        previous: prev.previous || calendarForecastPreviousImport.previous || "",
+        source: calendarForecastPreviousImport.source || "Calendar forecast/previous import",
+      }));
+      setEventResultStatus(`imported forecast/previous for ${selected.name}`);
     }
 
     const completedWithMissingResults = highImpactEvents.filter((e) => {
@@ -6618,16 +6640,29 @@ export default function App() {
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <Badge value={selected.importance === "Critical" ? "negative" : selected.importance === "High" ? "warning" : "blue"}>{selected.importance}</Badge>
                   <Badge value={saved?.actual ? "supportive" : "warning"}>{saved?.actual ? "result saved" : "optional result missing"}</Badge>
+                  {calendarForecastPreviousImport && <Badge value="supportive">forecast/previous import available</Badge>}
                 </div>
               </div>
               <p style={{ color: C.muted, lineHeight: 1.55 }}>{selected.expectedImpact}</p>
             </Card>
           )}
 
+          {calendarForecastPreviousImport && (
+            <Card style={{ background: "#0f172a", borderColor: "#1d4ed8", marginBottom: 12 }}>
+              <b style={{ color: C.text }}>Calendar forecast/previous import available:</b>{" "}
+              <span style={{ color: C.muted }}>
+                forecast={calendarForecastPreviousImport.forecast || "missing"} · previous={calendarForecastPreviousImport.previous || "missing"} · source={calendarForecastPreviousImport.source}
+              </span>
+              <div style={{ marginTop: 10 }}>
+                <button onClick={applyCalendarForecastPreviousImport} style={btn(false)}>Apply forecast/previous to form</button>
+              </div>
+            </Card>
+          )}
+
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-            <div><label style={label}>Previous</label><input style={input} value={form.previous} onChange={(e) => setForm({ ...form, previous: e.target.value })} placeholder="e.g., 3.1" /></div>
-            <div><label style={label}>Forecast</label><input style={input} value={form.forecast} onChange={(e) => setForm({ ...form, forecast: e.target.value })} placeholder="e.g., 3.0" /></div>
-            <div><label style={label}>Actual</label><input style={input} value={form.actual} onChange={(e) => setForm({ ...form, actual: e.target.value })} placeholder="e.g., 2.9" /></div>
+            <div><label style={label}>Previous</label><input style={input} value={form.previous} onChange={(e) => setForm({ ...form, previous: e.target.value })} placeholder="e.g., 179K" /></div>
+            <div><label style={label}>Forecast</label><input style={input} value={form.forecast} onChange={(e) => setForm({ ...form, forecast: e.target.value })} placeholder="e.g., 85K" /></div>
+            <div><label style={label}>Actual</label><input style={input} value={form.actual} onChange={(e) => setForm({ ...form, actual: e.target.value })} placeholder="e.g., 172K" /></div>
             <div>
               <label style={label}>Surprise</label>
               <select style={input} value={form.surprise} onChange={(e) => setForm({ ...form, surprise: e.target.value })}>
@@ -6723,6 +6758,7 @@ export default function App() {
                     {r.unemploymentRate && <Badge value="blue">unemp {r.unemploymentRate}</Badge>}
                     {r.averageHourlyEarningsMoM && <Badge value="blue">AHE MoM {r.averageHourlyEarningsMoM}</Badge>}
                     {r.sectorCompositionText && <Badge value="supportive">sector composition saved</Badge>}
+                    {r.forecastPreviousImport && <Badge value="supportive">calendar forecast/previous import</Badge>}
                   </div>
                 </Card>
               ))}
@@ -9065,10 +9101,69 @@ function isEmploymentSituationEvent(event) {
   return category.includes("labor") || name.includes("employment situation") || name.includes("non-farm") || name.includes("nonfarm") || id.includes("nfp");
 }
 
+
+const CALENDAR_FORECAST_PREVIOUS_IMPORTS = {
+  // v2.41.2 user-provided calendar snapshot import.
+  // Source context: external event calendar screenshot supplied by the operator.
+  // BLS supplies official actual/breakdowns; forecast/previous usually come from a calendar provider.
+  "bls-nfp-2026-06-05": {
+    eventName: "Employment Situation - May 2026",
+    forecast: "85K",
+    previous: "179K",
+    source: "User-provided calendar/provider import",
+    provider: "calendar_forecast_previous_import",
+    importedAt: "2026-06-06",
+    confidence: "manual_provider_enrichment",
+  },
+};
+
+function normalizeEventKeyText(value) {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function getCalendarForecastPreviousImport(event) {
+  if (!event) return null;
+
+  const byId = CALENDAR_FORECAST_PREVIOUS_IMPORTS[event.id];
+  if (byId) return byId;
+
+  const eventName = normalizeEventKeyText(event.name);
+  const eventDate = String(event.date || "").trim();
+
+  return Object.values(CALENDAR_FORECAST_PREVIOUS_IMPORTS).find((x) => {
+    const nameOk = normalizeEventKeyText(x.eventName) === eventName;
+    const dateOk = !x.date || String(x.date) === eventDate;
+    return nameOk && dateOk;
+  }) || null;
+}
+
+function mergeEventResultWithCalendarImport(event, result = {}) {
+  const calendarImport = getCalendarForecastPreviousImport(event);
+  if (!calendarImport) return result || {};
+
+  return {
+    ...result,
+    previous: result?.previous || event?.previous || calendarImport.previous || "",
+    forecast: result?.forecast || event?.forecast || calendarImport.forecast || "",
+    forecastPreviousImport: {
+      source: calendarImport.source || "Calendar forecast/previous import",
+      provider: calendarImport.provider || "",
+      importedAt: calendarImport.importedAt || "",
+      confidence: calendarImport.confidence || "manual_provider_enrichment",
+      usedForecast: !result?.forecast && !event?.forecast && !!calendarImport.forecast,
+      usedPrevious: !result?.previous && !event?.previous && !!calendarImport.previous,
+    },
+    source: result?.source || event?.source || calendarImport.source || "Calendar forecast/previous import",
+  };
+}
+
+
 function eventActualForecastExtractor(event, result = {}) {
-  const actual = normalizeEventResultValue(result, event, "actual");
-  const forecast = normalizeEventResultValue(result, event, "forecast");
-  const previous = normalizeEventResultValue(result, event, "previous");
+  const mergedResult = mergeEventResultWithCalendarImport(event, result);
+
+  const actual = normalizeEventResultValue(mergedResult, event, "actual");
+  const forecast = normalizeEventResultValue(mergedResult, event, "forecast");
+  const previous = normalizeEventResultValue(mergedResult, event, "previous");
 
   const actualK = parseMacroNumber(actual);
   const forecastK = parseMacroNumber(forecast);
@@ -9091,6 +9186,8 @@ function eventActualForecastExtractor(event, result = {}) {
     else previousComparison = "near_previous";
   }
 
+  const importMeta = mergedResult?.forecastPreviousImport || null;
+
   return {
     actual,
     forecast,
@@ -9102,8 +9199,11 @@ function eventActualForecastExtractor(event, result = {}) {
     surpriseDirection,
     previousDeltaK,
     previousComparison,
-    source: result?.source || event?.source || "",
+    source: mergedResult?.source || result?.source || event?.source || "",
     savedAt: result?.savedAt || "",
+    forecastSource: importMeta?.usedForecast ? importMeta.source : (result?.forecast ? (result?.source || "Event result") : (event?.forecast ? (event?.source || "Calendar") : "")),
+    previousSource: importMeta?.usedPrevious ? importMeta.source : (result?.previous ? (result?.source || "Event result") : (event?.previous ? (event?.source || "Calendar") : "")),
+    forecastPreviousImport: importMeta,
     status: actual ? "available" : "missing",
   };
 }
@@ -9293,6 +9393,21 @@ function goldImpactMapper(headline, quality, fedImplication) {
     };
   }
 
+  if (headline?.surpriseDirection === "stronger_than_expected") {
+    const compositionNotVerified =
+      !quality?.compositionSignal ||
+      quality?.compositionSignal === "composition_not_verified" ||
+      quality?.compositionSignal === "unknown";
+
+    return {
+      goldImpact: compositionNotVerified ? "conditionally_bearish" : "bearish_if_usd_yields_confirm",
+      rationale: compositionNotVerified
+        ? "Headline payrolls beat forecast, which is less dovish and conditionally gold-negative, but sector composition, wage pressure, USD/yields, and post-event gold reaction are still required before confirming the signal."
+        : "Headline payrolls beat forecast; confirm through USD, nominal yields, real yields, and post-event gold reaction.",
+      confirmationRequired,
+    };
+  }
+
   if (fedImplication === "more_dovish") {
     return {
       goldImpact: "conditionally_bullish",
@@ -9316,6 +9431,46 @@ function goldImpactMapper(headline, quality, fedImplication) {
   };
 }
 
+
+function recomputeEmploymentHeadlineDerivedFields(headline) {
+  const h = headline || {};
+
+  h.actualK = parseMacroNumber(h.actual);
+  h.forecastK = parseMacroNumber(h.forecast);
+  h.previousK = parseMacroNumber(h.previous);
+
+  h.surpriseK = Number.isFinite(h.actualK) && Number.isFinite(h.forecastK)
+    ? Math.round(h.actualK - h.forecastK)
+    : null;
+
+  h.previousDeltaK = Number.isFinite(h.actualK) && Number.isFinite(h.previousK)
+    ? Math.round(h.actualK - h.previousK)
+    : null;
+
+  if (Number.isFinite(h.surpriseK)) {
+    if (h.surpriseK > 10) h.surpriseDirection = "stronger_than_expected";
+    else if (h.surpriseK < -10) h.surpriseDirection = "weaker_than_expected";
+    else h.surpriseDirection = "near_forecast";
+  } else if (!h.forecast) {
+    h.surpriseDirection = "forecast_missing";
+  } else {
+    h.surpriseDirection = "unknown";
+  }
+
+  if (Number.isFinite(h.previousDeltaK)) {
+    if (h.previousDeltaK > 10) h.previousComparison = "higher_than_previous";
+    else if (h.previousDeltaK < -10) h.previousComparison = "lower_than_previous";
+    else h.previousComparison = "near_previous";
+  } else if (!h.previous) {
+    h.previousComparison = "previous_missing";
+  } else {
+    h.previousComparison = "unknown";
+  }
+
+  return h;
+}
+
+
 function buildEmploymentEventIntelligence(calendarEvents, eventResults, replayEvidence, fredRows = []) {
   const laborEvents = [...(calendarEvents || [])]
     .filter((e) => isEmploymentSituationEvent(e))
@@ -9331,6 +9486,7 @@ function buildEmploymentEventIntelligence(calendarEvents, eventResults, replayEv
   }
 
   const result = eventResults?.[latestCompleted.id] || {};
+  const resultWithCalendarImport = mergeEventResultWithCalendarImport(latestCompleted, result);
   const fredBackfill = buildFredEmploymentBackfill(fredRows);
   const headline = eventActualForecastExtractor(latestCompleted, result);
 
@@ -9342,7 +9498,12 @@ function buildEmploymentEventIntelligence(calendarEvents, eventResults, replayEv
     headline.status = "partial_fred_backfill";
   }
 
-  // v2.41.1 guardrail:
+  // v2.41.2.1:
+  // FRED PAYEMS actual can be backfilled after forecast/previous were imported.
+  // Recompute derived headline fields after all headline sources have been merged.
+  recomputeEmploymentHeadlineDerivedFields(headline);
+
+  // Guardrail:
   // Do not compute stronger/weaker surprise unless forecast exists.
   if (!headline.forecast) {
     headline.surpriseK = null;
@@ -9357,7 +9518,7 @@ function buildEmploymentEventIntelligence(calendarEvents, eventResults, replayEv
     headline.previousComparison = "previous_missing";
   }
 
-  const details = blsEmploymentSituationParser(latestCompleted, result);
+  const details = blsEmploymentSituationParser(latestCompleted, resultWithCalendarImport);
   if (!details.unemploymentRate && fredBackfill.unemploymentRate) {
     details.unemploymentRate = fredBackfill.unemploymentRate;
     details.unemploymentRateSource = fredBackfill.unrateSource || "FRED UNRATE fallback";
@@ -9373,7 +9534,9 @@ function buildEmploymentEventIntelligence(calendarEvents, eventResults, replayEv
   const available = hasAnyLaborData;
 
   let status = "missing_actual_forecast";
-  if (headline.status === "partial_fred_backfill" && !headline.forecast && !headline.previous) status = "partial_fred_backfill";
+  if (headline.status === "partial_fred_backfill" && headline.forecast && headline.previous && headline.forecastPreviousImport) status = "fred_actual_calendar_forecast_previous";
+  else if (headline.status === "partial_fred_backfill" && !headline.forecast && !headline.previous) status = "partial_fred_backfill";
+  else if (headline.forecastPreviousImport && headline.forecast && headline.previous) status = "calendar_forecast_previous_imported";
   else if (available && !headline.forecast) status = "partial_missing_forecast";
   else if (available) status = "available";
 
@@ -9396,6 +9559,9 @@ function buildEmploymentEventIntelligence(calendarEvents, eventResults, replayEv
       previousDeltaK: headline.previousDeltaK,
       previousComparison: headline.previousComparison,
       actualSource: headline.source || "",
+      forecastSource: headline.forecastSource || "",
+      previousSource: headline.previousSource || "",
+      forecastPreviousImport: headline.forecastPreviousImport || null,
       headlineInterpretation: headline.surpriseDirection === "forecast_missing"
         ? "actual_available_forecast_missing"
         : headline.surpriseDirection === "stronger_than_expected"
@@ -9453,9 +9619,13 @@ Headline:
 - actual=${e.headline?.actual || "missing"}
 - actualSource=${e.headline?.actualSource || "unknown"}
 - forecast=${e.headline?.forecast || "missing"}
+- forecastSource=${e.headline?.forecastSource || "unknown"}
 - previous=${e.headline?.previous || "missing"}
+- previousSource=${e.headline?.previousSource || "unknown"}
 - surpriseK=${e.headline?.surpriseK ?? "unknown"}
 - surpriseDirection=${e.headline?.surpriseDirection || "unknown"}
+- previousDeltaK=${e.headline?.previousDeltaK ?? "unknown"}
+- previousComparison=${e.headline?.previousComparison || "unknown"}
 Details:
 - unemploymentRate=${e.details?.unemploymentRate || "missing"}
 - unemploymentRateSource=${e.details?.unemploymentRateSource || "unknown"}
@@ -9487,7 +9657,7 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.41.1.11",
+        appVersion: "GoldScope v2.41.2.2",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -10123,11 +10293,25 @@ function applyScenarioHeaderAndTechnicalLabelPostProcessing(reportText, snapshot
 
 function buildEmploymentEventReportRow(snapshot) {
   const e = snapshot?.employmentEvent || {};
-  if (e?.status !== "partial_fred_backfill") return "";
+  const injectableStatuses = new Set([
+    "partial_fred_backfill",
+    "fred_actual_calendar_forecast_previous",
+    "calendar_forecast_previous_imported",
+  ]);
+  if (!injectableStatuses.has(e?.status)) return "";
   const h = e?.headline || {};
   const d = e?.details || {};
   const q = e?.quality || {};
-  return `| Employment event intelligence | PAYEMS actual=${h.actual || "missing"} from ${h.actualSource || "FRED PAYEMS fallback"}; UNRATE=${d.unemploymentRate || "missing"} from ${d.unemploymentRateSource || "FRED UNRATE fallback"}; forecast/previous/sector composition missing | labor surprise cannot be calculated; goldImpact=${q.goldImpact || "wait_for_confirmation"} | partial |`;
+  const forecastPart = h.forecast ? `forecast=${h.forecast} from ${h.forecastSource || "calendar/provider"}` : "forecast missing";
+  const previousPart = h.previous ? `previous=${h.previous} from ${h.previousSource || "calendar/provider"}` : "previous missing";
+  const surprisePart = Number.isFinite(Number(h.surpriseK))
+    ? `surpriseK=${h.surpriseK}; surpriseDirection=${h.surpriseDirection || "unknown"}; previousDeltaK=${h.previousDeltaK ?? "unknown"}; previousComparison=${h.previousComparison || "unknown"}`
+    : "labor surprise cannot be calculated";
+  const compositionPart = d.sectorConcentration && d.sectorConcentration !== "not_yet_verified"
+    ? `sectorConcentration=${d.sectorConcentration}`
+    : "sector composition not_yet_verified";
+
+  return `| Employment event intelligence | PAYEMS actual=${h.actual || "missing"} from ${h.actualSource || "FRED PAYEMS fallback"}; UNRATE=${d.unemploymentRate || "missing"} from ${d.unemploymentRateSource || "FRED UNRATE fallback"}; ${forecastPart}; ${previousPart}; ${compositionPart} | ${surprisePart}; goldImpact=${q.goldImpact || "wait_for_confirmation"} | ${e.status || "partial"} |`;
 }
 
 function injectEmploymentEventRowIntoEvidenceTable(reportText, snapshot) {
@@ -10646,6 +10830,189 @@ function applyNextCatalystMacroCoverageCleanup(reportText, snapshot) {
 }
 
 
+
+function hasKnownStrongerEmploymentHeadline(snapshot) {
+  const e = snapshot?.employmentEvent || {};
+  return e?.status === "fred_actual_calendar_forecast_previous" &&
+    e?.headline?.surpriseDirection === "stronger_than_expected" &&
+    Number.isFinite(Number(e?.headline?.surpriseK));
+}
+
+function buildEmploymentNarrativeText(snapshot) {
+  const e = snapshot?.employmentEvent || {};
+  const h = e?.headline || {};
+  const d = e?.details || {};
+  const q = e?.quality || {};
+  const surpriseK = Number.isFinite(Number(h.surpriseK)) ? h.surpriseK : "unknown";
+  const actual = h.actual || "missing";
+  const forecast = h.forecast || "missing";
+  const previous = h.previous || "missing";
+  const unrate = d.unemploymentRate || "missing";
+  const goldImpact = q.goldImpact || "wait_for_confirmation";
+
+  return {
+    statusLine: `NFP headline is available and stronger than expected: actual=${actual}, forecast=${forecast}, previous=${previous}, surpriseK=${surpriseK}, unemploymentRate=${unrate}. Sector composition, wage pressure, USD/yields confirmation, and replay alignment remain incomplete; therefore the labor signal is ${goldImpact}, not confirmed.`,
+    bullishWeakening: `Employment headline beat currently weakens the bullish case unless USD/yields and gold reaction contradict the first-order labor signal.`,
+    bearishSupport: `Conditional evidence: Employment headline is stronger than expected with surpriseK=${surpriseK}, which is conditionally gold-negative if USD/yields confirm, but sector composition and wage pressure are not yet verified.`,
+    cpiMissing: "CPI actual/forecast remains missing/date-only.",
+  };
+}
+
+function replaceNfpMissingOutcomeWording(text, narrative) {
+  let out = String(text || "");
+
+  const replacements = [
+    /\bno confirmed NFP\/CPI outcomes\b/gi,
+    /\bno actual NFP\/CPI outcomes\b/gi,
+    /\bNFP\/CPI outcomes are needed\b/gi,
+    /\bNFP\/CPI outcomes remain unconfirmed\b/gi,
+    /\bNFP\/CPI outcomes and real yield movements, which remain unconfirmed\b/gi,
+    /\bno confirmed macro-relevant news or actual NFP\/CPI outcomes\b/gi,
+    /\bNFP\/CPI data\b/gi,
+  ];
+
+  for (const re of replacements) {
+    out = out.replace(re, `${narrative.statusLine} ${narrative.cpiMissing}`);
+  }
+
+  // More targeted cleanup for "Missing evidence" clauses that say NFP is missing.
+  out = out.replace(
+    /No confirmed macro-relevant news,?\s*or\s*actual NFP\/CPI outcomes\.?/gi,
+    `No confirmed CPI outcome and no strong macro-relevant news. ${narrative.statusLine}`
+  );
+
+  out = out.replace(
+    /Missing evidence includes confirmed macro-relevant news, replay records, and reliable source data\.?/gi,
+    `Missing evidence includes CPI actual/forecast values, sector/wage detail for the employment report, USD/yields confirmation, stronger macro-relevant news, and higher-quality replay alignment.`
+  );
+
+  return out;
+}
+
+function injectEmploymentNarrativeIntoSection1(reportText, snapshot) {
+  let text = String(reportText || "");
+  if (!hasKnownStrongerEmploymentHeadline(snapshot)) return { text, applied: false };
+
+  const narrative = buildEmploymentNarrativeText(snapshot);
+  const bounds = extractNumberedSectionBoundaries(text, 1, 2, "Dominant research scenario");
+  if (!bounds) return { text, applied: false };
+
+  let section = replaceNfpMissingOutcomeWording(bounds.section, narrative);
+  if (!section.includes(narrative.statusLine)) {
+    section = section.replace(/\s*$/, `\n${narrative.statusLine} ${narrative.cpiMissing}\n`);
+  }
+
+  return {
+    text: bounds.before + section + bounds.after,
+    applied: section !== bounds.section,
+  };
+}
+
+function injectEmploymentNarrativeIntoBullishCase(reportText, snapshot) {
+  let text = String(reportText || "");
+  if (!hasKnownStrongerEmploymentHeadline(snapshot)) return { text, applied: false };
+
+  const narrative = buildEmploymentNarrativeText(snapshot);
+  const bounds = extractNumberedSectionBoundaries(text, 4, 5, "Bullish case for gold");
+  if (!bounds) return { text, applied: false };
+
+  let section = replaceNfpMissingOutcomeWording(bounds.section, narrative);
+  if (!section.includes(narrative.bullishWeakening)) {
+    if (/Technical confirmation context\s*:/i.test(section)) {
+      section = section.replace(/(Technical confirmation context\s*:[^\n]*)/i, `$1\n${narrative.bullishWeakening}`);
+    } else if (/Missing evidence\s*:/i.test(section)) {
+      section = section.replace(/(\n\s*(?:[-*]\s*)?(?:\*{0,2})?Missing evidence(?:\*{0,2})?\s*:)/i, `\n${narrative.bullishWeakening}\n$1`);
+    } else {
+      section = section.replace(/\s*$/, `\n${narrative.bullishWeakening}\n`);
+    }
+  }
+
+  return {
+    text: bounds.before + section + bounds.after,
+    applied: section !== bounds.section,
+  };
+}
+
+function injectEmploymentNarrativeIntoBearishCase(reportText, snapshot) {
+  let text = String(reportText || "");
+  if (!hasKnownStrongerEmploymentHeadline(snapshot)) return { text, applied: false };
+
+  const narrative = buildEmploymentNarrativeText(snapshot);
+  const bounds = extractNumberedSectionBoundaries(text, 5, 6, "Bearish case for gold");
+  if (!bounds) return { text, applied: false };
+
+  let section = replaceNfpMissingOutcomeWording(bounds.section, narrative);
+  if (!section.includes(narrative.bearishSupport)) {
+    if (/Technical confirmation context\s*:/i.test(section)) {
+      section = section.replace(/(Technical confirmation context\s*:[^\n]*)/i, `$1\n${narrative.bearishSupport}`);
+    } else if (/Missing evidence\s*:/i.test(section)) {
+      section = section.replace(/(\n\s*(?:[-*]\s*)?(?:\*{0,2})?Missing evidence(?:\*{0,2})?\s*:)/i, `\n${narrative.bearishSupport}\n$1`);
+    } else {
+      section = section.replace(/\s*$/, `\n${narrative.bearishSupport}\n`);
+    }
+  }
+
+  return {
+    text: bounds.before + section + bounds.after,
+    applied: section !== bounds.section,
+  };
+}
+
+function injectEmploymentNarrativeIntoWaitCase(reportText, snapshot) {
+  let text = String(reportText || "");
+  if (!hasKnownStrongerEmploymentHeadline(snapshot)) return { text, applied: false };
+
+  const narrative = buildEmploymentNarrativeText(snapshot);
+  const bounds = extractNumberedSectionBoundaries(text, 6, 7, "Wait/neutral case");
+  if (!bounds) return { text, applied: false };
+
+  let section = replaceNfpMissingOutcomeWording(bounds.section, narrative);
+  if (!section.includes(narrative.statusLine)) {
+    section = section.replace(/\s*$/, `\n${narrative.statusLine} ${narrative.cpiMissing}\n`);
+  }
+
+  return {
+    text: bounds.before + section + bounds.after,
+    applied: section !== bounds.section,
+  };
+}
+
+function applyEmploymentIntelligenceNarrativeInjection(reportText, snapshot) {
+  let text = String(reportText || "");
+  const changes = [];
+
+  const s1 = injectEmploymentNarrativeIntoSection1(text, snapshot);
+  if (s1.applied) {
+    text = s1.text;
+    changes.push("section1_employment_narrative_injected");
+  }
+
+  const s4 = injectEmploymentNarrativeIntoBullishCase(text, snapshot);
+  if (s4.applied) {
+    text = s4.text;
+    changes.push("bullish_case_employment_beat_weakening_inserted");
+  }
+
+  const s5 = injectEmploymentNarrativeIntoBearishCase(text, snapshot);
+  if (s5.applied) {
+    text = s5.text;
+    changes.push("bearish_case_employment_conditional_bearish_inserted");
+  }
+
+  const s6 = injectEmploymentNarrativeIntoWaitCase(text, snapshot);
+  if (s6.applied) {
+    text = s6.text;
+    changes.push("wait_case_employment_narrative_injected");
+  }
+
+  return {
+    output: text,
+    anyApplied: changes.length > 0,
+    changes: [...new Set(changes)],
+  };
+}
+
+
 function applyPostProcessedOutputCleanup(reportText, snapshot) {
   let text = String(reportText || "");
   const changes = [];
@@ -10654,6 +11021,12 @@ function applyPostProcessedOutputCleanup(reportText, snapshot) {
   if (employment.applied) {
     text = employment.text;
     changes.push("employment_event_row_injected");
+  }
+
+  const employmentNarrative = applyEmploymentIntelligenceNarrativeInjection(text, snapshot);
+  if (employmentNarrative.anyApplied) {
+    text = employmentNarrative.output;
+    changes.push(...employmentNarrative.changes.map((x) => `employment_narrative:${x}`));
   }
 
   const bullishTech = ensureBullishCaseTechnicalWeakening(text, snapshot);
@@ -11124,7 +11497,8 @@ ${JSON.stringify(data, null, 2)}`);
             const section7PostProcessed = replaceSection7WithDeterministicTechnicalConfirmation(finalConfirmedEvidenceSafety.text, snapshotForValidation);
             const maskedTechnicalSanitized = sanitizeMaskedTechnicalLeaks(section7PostProcessed, snapshotForValidation);
             const finalNextCatalystMacroCleanup = applyNextCatalystMacroCoverageCleanup(maskedTechnicalSanitized.output, snapshotForValidation);
-            const globalTechnicalConfirmedRelabel = forceGlobalTechnicalConfirmedEvidenceRelabel(finalNextCatalystMacroCleanup.output, snapshotForValidation);
+            const finalEmploymentNarrative = applyEmploymentIntelligenceNarrativeInjection(finalNextCatalystMacroCleanup.output, snapshotForValidation);
+            const globalTechnicalConfirmedRelabel = forceGlobalTechnicalConfirmedEvidenceRelabel(finalEmploymentNarrative.output, snapshotForValidation);
             const outputForValidation = globalTechnicalConfirmedRelabel.output;
             const validation = validateAiGoldReport(outputForValidation, snapshotForValidation);
             const validationText = formatValidationReport(validation);
@@ -11154,6 +11528,9 @@ ${JSON.stringify(data, null, 2)}`);
               const finalNextCatalystMacroCleanupNote = finalNextCatalystMacroCleanup.anyApplied
                 ? `\n\n---\nNEXT CATALYST + MACRO COVERAGE CLEANUP\nApplied changes: ${finalNextCatalystMacroCleanup.changes.join(", ")}. Next event name, complete-macro-coverage wording, and predictive technical table wording were cleaned before validation.`
                 : "";
+              const finalEmploymentNarrativeNote = finalEmploymentNarrative.anyApplied
+                ? `\n\n---\nEMPLOYMENT INTELLIGENCE NARRATIVE INJECTION\nApplied changes: ${finalEmploymentNarrative.changes.join(", ")}. NFP headline is known; report wording now distinguishes known labor headline from missing CPI/confirmation evidence.`
+                : "";
               const globalTechnicalConfirmedRelabelNote = globalTechnicalConfirmedRelabel.anyApplied
                 ? `\n\n---\nGLOBAL TECHNICAL CONFIRMED-EVIDENCE RELABEL\nApplied changes: ${globalTechnicalConfirmedRelabel.changes.join(", ")}. Any remaining technical Confirmed evidence labels were converted before validation.`
                 : "";
@@ -11161,8 +11538,8 @@ ${JSON.stringify(data, null, 2)}`);
                 ? `\n\n---\nRAW AI TECHNICAL LANGUAGE SANITIZER\nApplied technical-language cleanup only: ${sanitized.changes.join(", ")}. Macro/event logic was not changed.`
                 : "";
               const decorated = validation.issues.length
-                ? `${outputForValidation}${section7Note}${scenarioPostProcessingNote}${cleanupPostProcessingNote}${finalConfirmedEvidenceSafetyNote}${maskedTechnicalSanitizerNote}${finalNextCatalystMacroCleanupNote}${globalTechnicalConfirmedRelabelNote}${sanitizerNote}\n\n---\n${validationText}`
-                : `${outputForValidation}${section7Note}${scenarioPostProcessingNote}${cleanupPostProcessingNote}${finalConfirmedEvidenceSafetyNote}${maskedTechnicalSanitizerNote}${finalNextCatalystMacroCleanupNote}${globalTechnicalConfirmedRelabelNote}${sanitizerNote}`;
+                ? `${outputForValidation}${section7Note}${scenarioPostProcessingNote}${cleanupPostProcessingNote}${finalConfirmedEvidenceSafetyNote}${maskedTechnicalSanitizerNote}${finalNextCatalystMacroCleanupNote}${finalEmploymentNarrativeNote}${globalTechnicalConfirmedRelabelNote}${sanitizerNote}\n\n---\n${validationText}`
+                : `${outputForValidation}${section7Note}${scenarioPostProcessingNote}${cleanupPostProcessingNote}${finalConfirmedEvidenceSafetyNote}${maskedTechnicalSanitizerNote}${finalNextCatalystMacroCleanupNote}${finalEmploymentNarrativeNote}${globalTechnicalConfirmedRelabelNote}${sanitizerNote}`;
               setAiOutput(decorated);
               setAiStatus(validation.ok
                 ? (outputForValidation.includes("<END_GOLDSCOPE_REPORT>") ? "complete + validation passed" : "complete, but end marker missing")
@@ -11212,7 +11589,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.1.11.2",
+        appVersion: "GoldScope v2.41.2.2.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -11363,7 +11740,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Bare RSI extreme validator: on</Badge>
               <Badge value="supportive">Candlestick pattern layer: on</Badge>
               <Badge value="supportive">Prompt runtime reliability: on</Badge>
-              <Badge value="supportive">Safe report evidence wording: on</Badge>\n              <Badge value="supportive">Comparator exclusion: on</Badge>\n              <Badge value="supportive">Replay signal normalization: on</Badge>\n              <Badge value="supportive">Technical numeric grounding: on</Badge>\n              <Badge value="supportive">Deterministic technical section: on</Badge>\n              <Badge value="supportive">Section 7 post-processor: on</Badge>\n              <Badge value="supportive">Scenario header post-processor: on</Badge>\n              <Badge value="supportive">Employment event intelligence: on</Badge>\n              <Badge value="supportive">FRED employment backfill: on</Badge>\n              <Badge value="supportive">Employment-aware Safe Report: on</Badge>\n              <Badge value="supportive">Safe Report init-order fix: on</Badge>\n              <Badge value="supportive">Output cleanup post-processor: on</Badge>\n              <Badge value="supportive">Bold-colon evidence relabel: on</Badge>\n              <Badge value="supportive">Macro confirmed-evidence downgrade: on</Badge>\n              <Badge value="supportive">Final confirmed-evidence safety pass: on</Badge>\n              <Badge value="supportive">NFP invalidation direction guard: on</Badge>\n              <Badge value="supportive">Masked technical leak sanitizer: on</Badge>\n              <Badge value="supportive">Bearish-case technical wording fix: on</Badge>\n              <Badge value="supportive">Global technical confirmed-evidence relabel: on</Badge>\n              <Badge value="supportive">Next catalyst exact-name cleanup: on</Badge>
+              <Badge value="supportive">Safe report evidence wording: on</Badge>\n              <Badge value="supportive">Comparator exclusion: on</Badge>\n              <Badge value="supportive">Replay signal normalization: on</Badge>\n              <Badge value="supportive">Technical numeric grounding: on</Badge>\n              <Badge value="supportive">Deterministic technical section: on</Badge>\n              <Badge value="supportive">Section 7 post-processor: on</Badge>\n              <Badge value="supportive">Scenario header post-processor: on</Badge>\n              <Badge value="supportive">Employment event intelligence: on</Badge>\n              <Badge value="supportive">FRED employment backfill: on</Badge>\n              <Badge value="supportive">Employment-aware Safe Report: on</Badge>\n              <Badge value="supportive">Safe Report init-order fix: on</Badge>\n              <Badge value="supportive">Output cleanup post-processor: on</Badge>\n              <Badge value="supportive">Bold-colon evidence relabel: on</Badge>\n              <Badge value="supportive">Macro confirmed-evidence downgrade: on</Badge>\n              <Badge value="supportive">Final confirmed-evidence safety pass: on</Badge>\n              <Badge value="supportive">NFP invalidation direction guard: on</Badge>\n              <Badge value="supportive">Masked technical leak sanitizer: on</Badge>\n              <Badge value="supportive">Bearish-case technical wording fix: on</Badge>\n              <Badge value="supportive">Global technical confirmed-evidence relabel: on</Badge>\n              <Badge value="supportive">Next catalyst exact-name cleanup: on</Badge>\n              <Badge value="supportive">Calendar forecast/previous import: on</Badge>\n              <Badge value="supportive">Employment surprise recompute: on</Badge>\n              <Badge value="supportive">Employment narrative injection: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -11439,7 +11816,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Bare RSI extreme validator: on</Badge>
               <Badge value="supportive">Candlestick pattern layer: on</Badge>
               <Badge value="supportive">Prompt runtime reliability: on</Badge>
-              <Badge value="supportive">Safe report evidence wording: on</Badge>\n              <Badge value="supportive">Comparator exclusion: on</Badge>\n              <Badge value="supportive">Replay signal normalization: on</Badge>\n              <Badge value="supportive">Technical numeric grounding: on</Badge>\n              <Badge value="supportive">Deterministic technical section: on</Badge>\n              <Badge value="supportive">Section 7 post-processor: on</Badge>\n              <Badge value="supportive">Scenario header post-processor: on</Badge>\n              <Badge value="supportive">Employment event intelligence: on</Badge>\n              <Badge value="supportive">FRED employment backfill: on</Badge>\n              <Badge value="supportive">Employment-aware Safe Report: on</Badge>\n              <Badge value="supportive">Safe Report init-order fix: on</Badge>\n              <Badge value="supportive">Output cleanup post-processor: on</Badge>\n              <Badge value="supportive">Bold-colon evidence relabel: on</Badge>\n              <Badge value="supportive">Macro confirmed-evidence downgrade: on</Badge>\n              <Badge value="supportive">Final confirmed-evidence safety pass: on</Badge>\n              <Badge value="supportive">NFP invalidation direction guard: on</Badge>\n              <Badge value="supportive">Masked technical leak sanitizer: on</Badge>\n              <Badge value="supportive">Bearish-case technical wording fix: on</Badge>\n              <Badge value="supportive">Global technical confirmed-evidence relabel: on</Badge>\n              <Badge value="supportive">Next catalyst exact-name cleanup: on</Badge>
+              <Badge value="supportive">Safe report evidence wording: on</Badge>\n              <Badge value="supportive">Comparator exclusion: on</Badge>\n              <Badge value="supportive">Replay signal normalization: on</Badge>\n              <Badge value="supportive">Technical numeric grounding: on</Badge>\n              <Badge value="supportive">Deterministic technical section: on</Badge>\n              <Badge value="supportive">Section 7 post-processor: on</Badge>\n              <Badge value="supportive">Scenario header post-processor: on</Badge>\n              <Badge value="supportive">Employment event intelligence: on</Badge>\n              <Badge value="supportive">FRED employment backfill: on</Badge>\n              <Badge value="supportive">Employment-aware Safe Report: on</Badge>\n              <Badge value="supportive">Safe Report init-order fix: on</Badge>\n              <Badge value="supportive">Output cleanup post-processor: on</Badge>\n              <Badge value="supportive">Bold-colon evidence relabel: on</Badge>\n              <Badge value="supportive">Macro confirmed-evidence downgrade: on</Badge>\n              <Badge value="supportive">Final confirmed-evidence safety pass: on</Badge>\n              <Badge value="supportive">NFP invalidation direction guard: on</Badge>\n              <Badge value="supportive">Masked technical leak sanitizer: on</Badge>\n              <Badge value="supportive">Bearish-case technical wording fix: on</Badge>\n              <Badge value="supportive">Global technical confirmed-evidence relabel: on</Badge>\n              <Badge value="supportive">Next catalyst exact-name cleanup: on</Badge>\n              <Badge value="supportive">Calendar forecast/previous import: on</Badge>\n              <Badge value="supportive">Employment surprise recompute: on</Badge>\n              <Badge value="supportive">Employment narrative injection: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -11555,7 +11932,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.1.11.2",
+        appVersion: "GoldScope v2.41.2.2.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -11758,7 +12135,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.1.11.2",
+        appVersion: "GoldScope v2.41.2.2.2",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -12052,7 +12429,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.1.11.2</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.2.2.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>

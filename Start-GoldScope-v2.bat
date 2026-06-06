@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.41.1.11 - Next Catalyst Exact Name + Macro Coverage Wording Cleanup
+title GoldScope v2.41.2.2 - Employment Intelligence Narrative Injection
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.41.1.11 - Next Catalyst Exact Name + Macro Coverage Wording Cleanup
+echo   GoldScope v2.41.2.2 - Employment Intelligence Narrative Injection
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.
