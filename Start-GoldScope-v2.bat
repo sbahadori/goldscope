@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.37.8 - Scenario Header + Technical Evidence Label Mixed Splitter
+title GoldScope v2.41.1 - FRED Employment Backfill + Labor Data Readiness Fix
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.37.8 - Scenario Header + Technical Evidence Label Mixed Splitter
+echo   GoldScope v2.41.1 - FRED Employment Backfill + Labor Data Readiness Fix
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.
