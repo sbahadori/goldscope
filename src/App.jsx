@@ -3789,8 +3789,26 @@ function buildValidationSafeGoldReport(snapshot, validation) {
   const replayWording = replayAvailable
     ? "Replay evidence is available but limited/inconclusive; use it only as historical market-reaction context."
     : "Replay evidence is missing; no historical market-reaction validation is available.";
+
+  // v2.41.1.2 initialization-order fix:
+  // employment/event wording must be defined before macroWording uses eventEvidenceWording.
+  const employmentEvent = snapshot?.employmentEvent || {};
+  const employmentPartialFredBackfill = employmentEvent?.status === "partial_fred_backfill";
+  const employmentHeadline = employmentEvent?.headline || {};
+  const employmentDetails = employmentEvent?.details || {};
+  const employmentQuality = employmentEvent?.quality || {};
+  const employmentSafeText = employmentPartialFredBackfill
+    ? `Prior Employment Situation event is partially available from FRED: PAYEMS actual=${employmentHeadline.actual || "missing"} from ${employmentHeadline.actualSource || "FRED PAYEMS fallback"}; UNRATE=${employmentDetails.unemploymentRate || "missing"} from ${employmentDetails.unemploymentRateSource || "FRED UNRATE fallback"}. Forecast, previous, wage data, and sector composition are still missing, so surpriseDirection=${employmentHeadline.surpriseDirection || "forecast_missing"} and goldImpact=${employmentQuality.goldImpact || "wait_for_confirmation"}.`
+    : "";
+  const eventEvidenceWording = employmentPartialFredBackfill
+    ? "Next CPI actual/forecast values are missing; prior Employment event actual is partially available from FRED, but forecast/previous/sector composition are missing, so labor surprise and labor-quality cannot be confirmed"
+    : "event actual/forecast values are missing";
+  const employmentEvidenceRow = employmentPartialFredBackfill
+    ? `| Employment event intelligence | PAYEMS actual=${employmentHeadline.actual || "missing"} from ${employmentHeadline.actualSource || "FRED PAYEMS fallback"}; UNRATE=${employmentDetails.unemploymentRate || "missing"} from ${employmentDetails.unemploymentRateSource || "FRED UNRATE fallback"}; forecast/previous/sector composition missing | ${employmentQuality.goldImpact || "wait_for_confirmation"}; labor surprise cannot be calculated without forecast | partial_fred_backfill |`
+    : "";
+
   const macroWording = macroCoverageComplete
-    ? "Macro driver coverage is complete, but directional confidence remains capped because event actual/forecast values are missing, news is weak/rate-limited, and replay evidence is limited/inconclusive."
+    ? `Macro driver coverage is complete, but directional confidence remains capped because ${eventEvidenceWording}, news is weak/rate-limited, and replay evidence is limited/inconclusive.`
     : `Macro driver coverage is incomplete; missing critical macro drivers: ${missing.length ? missing.join(", ") : "none listed"}.`;
   const macroEvidenceState = macroCoverageComplete
     ? "Complete FRED coverage; no critical macro drivers missing"
@@ -3798,6 +3816,8 @@ function buildValidationSafeGoldReport(snapshot, validation) {
   const macroMissingEvidenceText = macroCoverageComplete
     ? "confirmed CPI/PCE outcome, event actual/forecast values, stronger live macro-relevant news, and additional high-quality replay evidence"
     : "confirmed CPI/PCE outcome, complete real-yield and USD drivers, event actual/forecast values, stronger live macro-relevant news, and additional high-quality replay evidence";
+  const macroMissingEvidenceTextSafe = macroMissingEvidenceText.replace("event actual/forecast values", employmentPartialFredBackfill ? "next CPI actual/forecast values plus employment forecast/previous/sector composition" : "event actual/forecast values");
+
   const maxConf = Number(flags.maxRecommendedConfidence ?? 25);
   const safeConfidence = Math.min(maxConf, techDesc.usable ? 25 : 15);
 
@@ -3815,12 +3835,12 @@ function buildValidationSafeGoldReport(snapshot, validation) {
 
   const validationDisplay = formatRejectedValidationForDisplay(validation);
 
-  return `VALIDATION-GATED SAFE REPORT
+  const safeReportText = `VALIDATION-GATED SAFE REPORT
 The original AI report was rejected because it failed high-severity validation. The following report is generated deterministically from the GoldScope snapshot. The validation list at the end refers to the rejected original AI output, not to this safe report. Non-critical raw-output diagnostics are summarized instead of fully displayed.
 
 1. Dominant research scenario
 Wait-Neutral.
-The system should not assign a bullish or bearish research scenario because event outcomes are still blank, news strength is weak, and replay evidence is limited/inconclusive. ${macroWording} ${replayWording} ${techDesc.usable ? "Technical context is usable only as confirmation context, not as a standalone scenario driver." : "Technical context is not usable for scenario evidence."} ${alignmentText}
+The system should not assign a bullish or bearish research scenario because next CPI outcomes are still blank, news strength is weak, and replay evidence is limited/inconclusive. ${macroWording} ${employmentSafeText ? employmentSafeText + " " : ""}${replayWording} ${techDesc.usable ? "Technical context is usable only as confirmation context, not as a standalone scenario driver." : "Technical context is not usable for scenario evidence."} ${alignmentText}
 
 2. Confidence score
 ${safeConfidence}.
@@ -3830,10 +3850,10 @@ Confidence reducers: FRED coverage=${fredRows}/11, macroCoverageComplete=${macro
 3. Evidence table
 | Evidence block | Current state | Gold implication | Reliability |
 |---|---|---|---|
-| Macro | ${macroEvidenceState} | Direction cannot be confirmed until event actual/forecast and market reaction are available | ${safeValue(flags.macroReliability)} |
+| Macro | ${macroEvidenceState} | Direction cannot be confirmed until event surprise, market reaction, and source confirmation are available | ${safeValue(flags.macroReliability)} |
 | News | ${newsItems} item(s); newsStrength=${safeValue(flags.newsStrength)}; macroRelevantNewsCount=${safeValue(flags.macroRelevantNewsCount, 0)} | Not sufficient for directional confirmation | ${safeValue(flags.newsStrength)} |
-| Calendar/event risk | ${nextName} on ${nextDate} ${nextTime}; forecast/actual fields are missing | Conditional only | ${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)} |
-| Replay evidence | ${replayRecords} replay record(s); signal=${replaySignal}; ${replayObservedText}; avgQuality=${replayAvgQuality} | ${replayRecords ? 'Available but limited/inconclusive; historical context only' : 'No historical validation'} | ${safeValue(flags.replayReliability)} |
+| Calendar/event risk | ${nextName} on ${nextDate} ${nextTime}; next CPI forecast/actual fields are missing | Conditional only | ${safeValue(flags.eventDataCompleteness?.nextMajor?.quality)} |
+${employmentEvidenceRow ? employmentEvidenceRow + "\n" : ""}| Replay evidence | ${replayRecords} replay record(s); signal=${replaySignal}; ${replayObservedText}; avgQuality=${replayAvgQuality} | ${replayRecords ? 'Available but limited/inconclusive; historical context only' : 'No historical validation'} | ${safeValue(flags.replayReliability)} |
 | Technical context | ${techDesc.evidenceRowState} | ${techDesc.implication} | ${techDesc.reliability} |
 | Source/data readiness | FRED rows=${fredRows}; news items=${newsItems}; TradingEconomics/Reddit/YouTube may be missing | Limited source coverage | partial |
 
@@ -3841,18 +3861,18 @@ Confidence reducers: FRED coverage=${fredRows}/11, macroCoverageComplete=${macro
 Confirmed evidence: none.
 Conditional evidence: if future labor data weakens expectations and yields/USD fall, gold may receive support; if inflation is hot while real yields fall, gold may receive support. These are conditional gates only because actual and forecast values are missing.
 Technical confirmation context: ${techDesc.usable ? technicalCaseWording(tech, "bullish") : "not usable."}
-Missing evidence: ${macroMissingEvidenceText}, and event-time technical reaction.
+Missing evidence: ${macroMissingEvidenceTextSafe}, and event-time technical reaction.
 Invalidation conditions: if labor data strengthens expectations and yields/USD rise, or if hot inflation lifts real yields, the bullish case weakens.
 
 5. Bearish case for gold
 Confirmed evidence: none.
 Conditional evidence: if future labor data strengthens expectations and yields/USD rise, gold may face pressure; if inflation is hot and real yields rise, gold may face pressure. These are conditional gates only.
 Technical confirmation context: ${techDesc.usable ? technicalCaseWording(tech, "bearish") : "not usable."}
-Missing evidence: ${macroMissingEvidenceText}, and event-time technical reaction.
+Missing evidence: ${macroMissingEvidenceTextSafe}, and event-time technical reaction.
 Invalidation conditions: if labor data weakens expectations and yields/USD fall, or if real yields fall despite hot inflation, the bearish case weakens.
 
 6. Wait/neutral case
-Wait-Neutral is the appropriate state because the snapshot lacks confirmed event outcomes and strong macro-relevant news. ${macroWording} Replay evidence status: ${replayRecords ? `${replayRecords} record(s), signal=${replaySignal}, ${replayObservedText}, avgQuality=${replayAvgQuality}; available but limited/inconclusive` : 'missing'}. ${techDesc.usable ? "Technical context is available, but it is only confirmation context and cannot override missing macro/event evidence. " + alignmentText : "Technical context is not usable as confirmation."}
+Wait-Neutral is the appropriate state because the snapshot lacks confirmed next-CPI outcomes and strong macro-relevant news. ${macroWording} ${employmentSafeText ? employmentSafeText + " " : ""}Replay evidence status: ${replayRecords ? `${replayRecords} record(s), signal=${replaySignal}, ${replayObservedText}, avgQuality=${replayAvgQuality}; available but limited/inconclusive` : 'missing'}. ${techDesc.usable ? "Technical context is available, but it is only confirmation context and cannot override missing macro/event evidence. " + alignmentText : "Technical context is not usable as confirmation."}
 
 7. Technical confirmation
 ${techDesc.section}
@@ -3871,12 +3891,17 @@ After: compare actual event outcome and market reaction in USD/yields/gold, then
 Avoid-window: ${avoidWindow}.
 
 10. Final research note
-This report remains Wait-Neutral because event outcomes are still blank, news is weak/rate-limited, replay evidence is limited/inconclusive, and the rejected AI output contained validation failures. ${techDesc.usable ? "Technical context is available as confirmation context, but directional bias remains blocked until event outcomes, market reaction, and replay evidence quality improve." : "Directional bias should remain blocked until event outcomes, market reaction, replay evidence quality, and usable technical context improve."} <END_GOLDSCOPE_REPORT>
+This report remains Wait-Neutral because next-CPI outcomes are still blank, prior employment data is only partially available from FRED without forecast/previous/sector composition, news is weak/rate-limited, replay evidence is limited/inconclusive, and the rejected AI output contained validation failures. ${techDesc.usable ? "Technical context is available as confirmation context, but directional bias remains blocked until event outcomes, market reaction, and replay evidence quality improve." : "Directional bias should remain blocked until event outcomes, market reaction, replay evidence quality, and usable technical context improve."} <END_GOLDSCOPE_REPORT>
 
 REJECTED AI OUTPUT VALIDATION
 This section explains why the raw AI response was rejected. It is not an error in the safe report.
 
 ${validationDisplay}`;
+  return safeReportText
+    .replace(/confirmed\.,\s*news/gi, "confirmed; news")
+    .replace(/confirmed\.,/gi, "confirmed;")
+    .replace(/missing\.,\s*news/gi, "missing; news");
+
 }
 
 
@@ -9462,7 +9487,7 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.41.1",
+        appVersion: "GoldScope v2.41.1.10",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -9734,7 +9759,7 @@ function forceSection1WaitNeutralIfNeeded(reportText, snapshot) {
 const TECHNICAL_LABEL_KEYWORDS = [
   "technical context", "technicals", "technical bias", "technical bearish", "technical bullish",
   "technical alignment", "technical indicators", "ema alignment", "ema20", "ema50", "ema200",
-  "rsi", "rsi14", "macd", "adx", "bollinger", "keltner", "stoch", "stochastic rsi",
+  "rsi", "rsi14", "macd", "adx", "bollinger", "keltner", "stoch", "stochrsi", "stochastic rsi", "stochrsi <0.2", "stochrsi < 0.2",
   "candlestick", "strategy modules", "trend module", "momentum module", "volatility module",
   "structure module", "multi-timeframe", "multi timeframe", "pricevsema", "support", "resistance"
 ];
@@ -9804,21 +9829,29 @@ function splitEvidenceTextByTechnicalMacro(evidenceText) {
 }
 
 function normalizeConfirmedEvidenceLineWithMixedSplitter(line) {
-  const re = /^(\s*(?:[-*]\s*)?(?:\*{0,2})Confirmed evidence(?:\*{0,2})\s*:)(.*)$/i;
-  const m = String(line || "").match(re);
-  if (!m) return { line, changed: false };
+  const original = String(line || "");
 
-  const prefix = m[1] || "";
+  // v2.41.1.4: handle markdown/bullet variants with colon either inside or outside bold:
+  // - **Confirmed evidence:** Technical context ...
+  // - **Confirmed evidence**: Technical context ...
+  // - - **Confirmed evidence:** RSI / StochRSI / EMA / MACD / ADX / strategy modules ...
+  const re = /^(\s*(?:[-*]\s*)?)(?:\*{0,2})\s*Confirmed evidence\s*:?\s*(?:\*{0,2})\s*:?\s*(.*)$/i;
+  const m = original.match(re);
+  if (!m) return { line: original, changed: false };
+
+  const bullet = m[1] || "";
   const body = (m[2] || "").trim();
 
   const split = splitEvidenceTextByTechnicalMacro(body);
   const hasTechnical = !!split.technicalPart;
   const hasMacro = !!split.macroPart;
 
+  const cleanTail = (s) => String(s || "").replace(/[.;,\s]+$/g, "").trim();
+  const bulletPrefix = /^\s*[-*]\s*/.test(bullet) ? "- " : bullet;
+
   if (hasTechnical && hasMacro) {
-    const bulletPrefix = /^\s*[-*]\s*/.test(prefix) ? "- " : "";
     return {
-      line: `${bulletPrefix}Confirmed evidence: ${split.macroPart.replace(/[.;,\s]+$/g, "")}.\n${bulletPrefix}Technical confirmation context: ${split.technicalPart.replace(/[.;,\s]+$/g, "")}.`,
+      line: `${bulletPrefix}Confirmed evidence: ${cleanTail(split.macroPart)}.\n${bulletPrefix}Technical confirmation context: ${cleanTail(split.technicalPart)}.`,
       changed: true,
       mode: "mixed_split",
     };
@@ -9826,13 +9859,13 @@ function normalizeConfirmedEvidenceLineWithMixedSplitter(line) {
 
   if (hasTechnical && !hasMacro) {
     return {
-      line: line.replace(/Confirmed evidence/i, "Technical confirmation context"),
+      line: `${bulletPrefix}Technical confirmation context: ${cleanTail(split.technicalPart)}.`,
       changed: true,
       mode: "technical_only_relabel",
     };
   }
 
-  return { line, changed: false };
+  return { line: original, changed: false };
 }
 
 function normalizeTechnicalEvidenceLabelsWithMixedSplitter(reportText) {
@@ -9863,6 +9896,194 @@ function normalizeTechnicalEvidenceLabelsWithMixedSplitter(reportText) {
   return { text: fixedTarget, applied: true, changes: [...new Set(changes)] };
 }
 
+
+const MACRO_CONFIRMED_OVERCLAIM_KEYWORDS = [
+  "macro supportive",
+  "macro support",
+  "macro context aligns",
+  "macro context aligned",
+  "macro drivers support",
+  "macro drivers supportive",
+  "fred macro drivers",
+  "fred drivers",
+  "replay evidence",
+  "replay record",
+  "replay records",
+  "replay signal",
+  "macro read is supportive",
+  "macroDirection: supportive",
+  "macro direction supportive",
+];
+
+function shouldDowngradeMacroConfirmedEvidence(snapshot) {
+  const eventQuality = String(snapshot?.contextQualityFlags?.eventDataCompleteness?.nextMajor?.quality || "").toLowerCase();
+  const newsStrength = String(snapshot?.contextQualityFlags?.newsStrength || "").toLowerCase();
+
+  const replayAlignment =
+    String(snapshot?.deterministicScenarioLab?.replaySignal?.alignment ||
+      snapshot?.replayEvidence?.latest?.alignment ||
+      "").toLowerCase();
+
+  const hasConfirmedOutcome =
+    Boolean(snapshot?.calendar?.nextMajor?.actual) ||
+    Boolean(snapshot?.deterministicScenarioLab?.nextMajor?.actual);
+
+  const hasStrongReplay =
+    ["aligned", "confirmed", "macro_aligned", "gold-positive-aligned", "gold-negative-aligned"].some((x) =>
+      replayAlignment.includes(x)
+    ) && !replayAlignment.includes("inconclusive");
+
+  // Only downgrade in weak/incomplete states.
+  // Do not downgrade when there is an actual outcome or clearly strong replay alignment.
+  return eventQuality === "date-only" &&
+    newsStrength === "weak" &&
+    (replayAlignment === "" || replayAlignment.includes("inconclusive")) &&
+    !hasConfirmedOutcome &&
+    !hasStrongReplay;
+}
+
+function isConfirmedEvidenceNoneLine(line) {
+  return /^\s*(?:[-*]\s*)?(?:\*{0,2})\s*Confirmed evidence\s*:?\s*(?:\*{0,2})\s*:?\s*(?:none|no confirmed evidence|n\/a)\.?\s*$/i.test(String(line || ""));
+}
+
+function parseConfirmedEvidenceLine(line) {
+  const original = String(line || "");
+  const re = /^(\s*(?:[-*]\s*)?)(?:\*{0,2})\s*Confirmed evidence\s*:?\s*(?:\*{0,2})\s*:?\s*(.*)$/i;
+  const m = original.match(re);
+  if (!m) return null;
+  return {
+    bullet: m[1] || "",
+    body: (m[2] || "").trim(),
+  };
+}
+
+function containsMacroOverclaimKeyword(text) {
+  const lo = String(text || "").toLowerCase();
+  return MACRO_CONFIRMED_OVERCLAIM_KEYWORDS.some((kw) => lo.includes(kw.toLowerCase()));
+}
+
+function downgradeMacroConfirmedEvidenceLine(line, snapshot) {
+  const original = String(line || "");
+  const parsed = parseConfirmedEvidenceLine(original);
+  if (!parsed) return { line: original, changed: false };
+
+  if (isConfirmedEvidenceNoneLine(original)) {
+    return { line: original, changed: false };
+  }
+
+  if (!shouldDowngradeMacroConfirmedEvidence(snapshot)) {
+    return { line: original, changed: false };
+  }
+
+  const body = parsed.body;
+  if (!containsMacroOverclaimKeyword(body)) {
+    return { line: original, changed: false };
+  }
+
+  const split = splitEvidenceTextByTechnicalMacro(body);
+  const bulletPrefix = /^\s*[-*]\s*/.test(parsed.bullet) ? "- " : parsed.bullet;
+  const cleanTail = (s) => String(s || "").replace(/[.;,\s]+$/g, "").trim();
+
+  const conditionalLine = `${bulletPrefix}Conditional evidence: Macro context is supportive, but event outcomes, forecast/actual values, and replay confirmation are still missing/inconclusive.`;
+
+  if (split.technicalPart) {
+    return {
+      line: `${conditionalLine}\n${bulletPrefix}Technical confirmation context: ${cleanTail(split.technicalPart)}.`,
+      changed: true,
+      mode: "macro_confirmed_overclaim_downgraded_with_technical_split",
+    };
+  }
+
+  return {
+    line: conditionalLine,
+    changed: true,
+    mode: "macro_confirmed_overclaim_downgraded",
+  };
+}
+
+function downgradeMacroConfirmedEvidenceOverclaims(reportText, snapshot) {
+  const text = String(reportText || "");
+  const s4 = extractNumberedSectionBoundaries(text, 4, 6);
+  const target = s4 ? s4.section : text;
+
+  const changes = [];
+  const fixedLines = target.split("\n").map((line) => {
+    if (!/Confirmed evidence/i.test(line)) return line;
+    const fixed = downgradeMacroConfirmedEvidenceLine(line, snapshot);
+    if (fixed.changed) changes.push(fixed.mode || "macro_confirmed_overclaim_downgraded");
+    return fixed.line;
+  });
+
+  if (!changes.length) return { text, applied: false, changes: [] };
+
+  const fixedTarget = fixedLines.join("\n");
+  if (s4) {
+    return {
+      text: s4.before + fixedTarget + s4.after,
+      applied: true,
+      changes: [...new Set(changes)],
+    };
+  }
+
+  return { text: fixedTarget, applied: true, changes: [...new Set(changes)] };
+}
+
+
+
+function forceRelabelRemainingTechnicalConfirmedEvidence(reportText, snapshot) {
+  const text = String(reportText || "");
+  const s4 = extractNumberedSectionBoundaries(text, 4, 6);
+  const target = s4 ? s4.section : text;
+
+  const changes = [];
+  const fixedLines = target.split("\n").map((line) => {
+    const parsed = parseConfirmedEvidenceLine(line);
+    if (!parsed) return line;
+    if (isConfirmedEvidenceNoneLine(line)) return line;
+
+    const body = parsed.body || "";
+    const split = splitEvidenceTextByTechnicalMacro(body);
+    const hasTechnical = !!split.technicalPart;
+    const hasMacro = !!split.macroPart;
+
+    if (!hasTechnical) return line;
+
+    const bulletPrefix = /^\s*[-*]\s*/.test(parsed.bullet || "") ? "- " : (parsed.bullet || "");
+    const cleanTail = (s) => String(s || "").replace(/[.;,\s]+$/g, "").trim();
+
+    // Final guardrail: any remaining Confirmed evidence line containing technical context
+    // must not remain confirmed. If there is a macro part, downgrade it to conditional
+    // under incomplete/date-only evidence conditions; otherwise keep a neutral conditional line.
+    if (hasMacro) {
+      const conditional =
+        shouldDowngradeMacroConfirmedEvidence(snapshot)
+          ? `${bulletPrefix}Conditional evidence: Macro context is supportive, but event outcomes, forecast/actual values, and replay confirmation are still missing/inconclusive.`
+          : `${bulletPrefix}Conditional evidence: ${cleanTail(split.macroPart)}.`;
+      changes.push("remaining_mixed_confirmed_evidence_forced_split");
+      return `${conditional}\n${bulletPrefix}Technical confirmation context: ${cleanTail(split.technicalPart)}.`;
+    }
+
+    changes.push("remaining_technical_confirmed_evidence_forced_relabel");
+    return `${bulletPrefix}Technical confirmation context: ${cleanTail(split.technicalPart)}.`;
+  });
+
+  if (!changes.length) {
+    return { text, applied: false, changes: [] };
+  }
+
+  const fixedTarget = fixedLines.join("\n");
+  if (s4) {
+    return {
+      text: s4.before + fixedTarget + s4.after,
+      applied: true,
+      changes: [...new Set(changes)],
+    };
+  }
+
+  return { text: fixedTarget, applied: true, changes: [...new Set(changes)] };
+}
+
+
 function applyScenarioHeaderAndTechnicalLabelPostProcessing(reportText, snapshot) {
   let text = String(reportText || "");
   const changes = [];
@@ -9877,6 +10098,443 @@ function applyScenarioHeaderAndTechnicalLabelPostProcessing(reportText, snapshot
   if (labels.applied) {
     text = labels.text;
     changes.push(...labels.changes.map((x) => `technical_evidence_label:${x}`));
+  }
+
+  const macroDowngrade = downgradeMacroConfirmedEvidenceOverclaims(text, snapshot);
+  if (macroDowngrade.applied) {
+    text = macroDowngrade.text;
+    changes.push(...macroDowngrade.changes.map((x) => `macro_confirmed_overclaim:${x}`));
+  }
+
+  const finalTechnicalConfirmedSafety = forceRelabelRemainingTechnicalConfirmedEvidence(text, snapshot);
+  if (finalTechnicalConfirmedSafety.applied) {
+    text = finalTechnicalConfirmedSafety.text;
+    changes.push(...finalTechnicalConfirmedSafety.changes.map((x) => `final_confirmed_evidence_safety:${x}`));
+  }
+
+  return {
+    output: text,
+    changes,
+    anyApplied: changes.length > 0,
+  };
+}
+
+
+
+function buildEmploymentEventReportRow(snapshot) {
+  const e = snapshot?.employmentEvent || {};
+  if (e?.status !== "partial_fred_backfill") return "";
+  const h = e?.headline || {};
+  const d = e?.details || {};
+  const q = e?.quality || {};
+  return `| Employment event intelligence | PAYEMS actual=${h.actual || "missing"} from ${h.actualSource || "FRED PAYEMS fallback"}; UNRATE=${d.unemploymentRate || "missing"} from ${d.unemploymentRateSource || "FRED UNRATE fallback"}; forecast/previous/sector composition missing | labor surprise cannot be calculated; goldImpact=${q.goldImpact || "wait_for_confirmation"} | partial |`;
+}
+
+function injectEmploymentEventRowIntoEvidenceTable(reportText, snapshot) {
+  const row = buildEmploymentEventReportRow(snapshot);
+  const text = String(reportText || "");
+  if (!row || /Employment event intelligence/i.test(text)) {
+    return { text, applied: false };
+  }
+
+  const replayRowRe = /\n\|\s*Replay evidence\s*\|/i;
+  if (replayRowRe.test(text)) {
+    return {
+      text: text.replace(replayRowRe, `\n${row}\n| Replay evidence |`),
+      applied: true,
+    };
+  }
+
+  const calendarRowRe = /(\n\|\s*Calendar\/event risk\s*\|[^\n]*\n)/i;
+  if (calendarRowRe.test(text)) {
+    return {
+      text: text.replace(calendarRowRe, `$1${row}\n`),
+      applied: true,
+    };
+  }
+
+  return { text, applied: false };
+}
+
+function enforceExactAvoidWindowInSection9(reportText, snapshot) {
+  const text = String(reportText || "");
+  const avoidWindow =
+    snapshot?.deterministicScenarioLab?.nextMajor?.avoidWindow ||
+    snapshot?.calendar?.nextMajor?.avoidWindow ||
+    "";
+  if (!avoidWindow) return { text, applied: false };
+
+  const bounds = extractNumberedSectionBoundaries(text, 9, 10, "Next catalyst plan");
+  if (!bounds) return { text, applied: false };
+
+  let section = bounds.section;
+  const exactLine = `Avoid-window: ${avoidWindow}.`;
+
+  if (/Avoid-window\s*:\s*/i.test(section)) {
+    section = section.replace(/Avoid-window\s*:\s*[^\n]*/i, exactLine);
+  } else if (/\bavoid[- ]window\b/i.test(section)) {
+    section = section.replace(/.*\bavoid[- ]window\b.*$/im, exactLine);
+  } else {
+    section = section.replace(/\s*$/, `\n${exactLine}\n`);
+  }
+
+  return {
+    text: bounds.before + section + bounds.after,
+    applied: section !== bounds.section,
+  };
+}
+
+function ensureBullishCaseTechnicalWeakening(reportText, snapshot) {
+  const text = String(reportText || "");
+  const techBias = String(snapshot?.technicalContext?.technicalBias || "").toLowerCase();
+  if (techBias !== "bearish") return { text, applied: false };
+
+  const sentence = "Technical confirmation context: Technical bias is bearish; therefore it currently weakens the bullish conditional case.";
+  if (text.includes(sentence)) return { text, applied: false };
+
+  const bounds = extractNumberedSectionBoundaries(text, 4, 5, "Bullish case for gold");
+  if (!bounds) return { text, applied: false };
+
+  let section = bounds.section;
+
+  if (/Technical confirmation context\s*:/i.test(section)) {
+    section = section.replace(/Technical confirmation context\s*:[^\n]*/i, sentence);
+  } else if (/Missing evidence\s*:/i.test(section)) {
+    section = section.replace(/(\n\s*(?:[-*]\s*)?(?:\*{0,2})?Missing evidence(?:\*{0,2})?\s*:)/i, `\n${sentence}\n$1`);
+  } else {
+    section = section.replace(/\s*$/, `\n${sentence}\n`);
+  }
+
+  return {
+    text: bounds.before + section + bounds.after,
+    applied: section !== bounds.section,
+  };
+}
+
+
+function normalizeNfpDirectionalInvalidationPhrases(reportText) {
+  let text = String(reportText || "");
+  const changes = [];
+
+  const replaceLine = (line, sectionName = "") => {
+    const raw = String(line || "");
+    let fixed = raw;
+
+    const isInvalidation = /Invalidation conditions\s*:/i.test(raw);
+    const hasStrongLabor =
+      /\bstrong\s+NFP\b/i.test(raw) ||
+      /\bstrong\s+labor\b/i.test(raw) ||
+      /\blabor data strengthens\b/i.test(raw) ||
+      /\blabor strengthens\b/i.test(raw);
+
+    const hasWeakLabor =
+      /\bweak\s+NFP\b/i.test(raw) ||
+      /\bweak\s+labor\b/i.test(raw) ||
+      /\blabor data weakens\b/i.test(raw) ||
+      /\blabor weakens\b/i.test(raw);
+
+    const hasRisingYieldsUsd =
+      /rising\s+yields\s*\/\s*USD/i.test(raw) ||
+      /yields\s*\/\s*USD\s+rise/i.test(raw) ||
+      /yields\s+and\s+USD\s+rise/i.test(raw);
+
+    const hasFallingYieldsUsd =
+      /falling\s+yields\s*\/\s*USD/i.test(raw) ||
+      /yields\s*\/\s*USD\s+fall/i.test(raw) ||
+      /yields\s+and\s+USD\s+fall/i.test(raw);
+
+    // Bullish case guard:
+    // strong labor + rising yields/USD should weaken bullish gold case, not support it.
+    if (/bullish/i.test(sectionName) && isInvalidation && hasStrongLabor && hasRisingYieldsUsd) {
+      fixed = raw.replace(
+        /Invalidation conditions\s*:[^\n]*/i,
+        "Invalidation conditions: if labor data strengthens expectations and yields/USD rise, the bullish case weakens; if hot inflation lifts real yields, the bullish case weakens."
+      );
+      changes.push("bullish_invalidation_strong_labor_rising_yields_fixed");
+    }
+
+    // Bearish case guard:
+    // weak labor + falling yields/USD should weaken bearish gold case, not support it.
+    if (/bearish/i.test(sectionName) && isInvalidation && hasWeakLabor && hasFallingYieldsUsd) {
+      fixed = raw.replace(
+        /Invalidation conditions\s*:[^\n]*/i,
+        "Invalidation conditions: if labor data weakens expectations and yields/USD fall, the bearish case weakens; if real yields fall despite hot inflation, the bearish case weakens."
+      );
+      changes.push("bearish_invalidation_weak_labor_falling_yields_fixed");
+    }
+
+    // Generic cleanup for parenthetical examples that trigger NFP-direction validator.
+    // Avoid "e.g., strong NFP, rising yields/USD" without explicit gold-negative consequence.
+    if (isInvalidation && /\(e\.g\.,\s*strong\s+NFP,\s*rising\s+yields\s*\/\s*USD\)/i.test(fixed)) {
+      fixed = fixed.replace(
+        /\(e\.g\.,\s*strong\s+NFP,\s*rising\s+yields\s*\/\s*USD\)/ig,
+        "(strong labor with rising yields/USD is gold-negative and weakens the bullish case)"
+      );
+      changes.push("strong_nfp_example_explicitly_gold_negative");
+    }
+
+    if (isInvalidation && /\(e\.g\.,\s*weak\s+NFP,\s*falling\s+yields\s*\/\s*USD\)/i.test(fixed)) {
+      fixed = fixed.replace(
+        /\(e\.g\.,\s*weak\s+NFP,\s*falling\s+yields\s*\/\s*USD\)/ig,
+        "(weak labor with falling yields/USD is gold-supportive and weakens the bearish case)"
+      );
+      changes.push("weak_nfp_example_explicitly_gold_supportive");
+    }
+
+    return fixed;
+  };
+
+  const applyToSection = (sectionNumber, nextSectionNumber, title, sectionName) => {
+    const bounds = extractNumberedSectionBoundaries(text, sectionNumber, nextSectionNumber, title);
+    if (!bounds) return;
+
+    const fixedSection = bounds.section
+      .split("\n")
+      .map((line) => replaceLine(line, sectionName))
+      .join("\n");
+
+    if (fixedSection !== bounds.section) {
+      text = bounds.before + fixedSection + bounds.after;
+    }
+  };
+
+  applyToSection(4, 5, "Bullish case for gold", "bullish");
+  applyToSection(5, 6, "Bearish case for gold", "bearish");
+
+  return {
+    output: text,
+    anyApplied: changes.length > 0,
+    changes: [...new Set(changes)],
+  };
+}
+
+
+
+function isTechnicalContextMaskedOrUnusable(snapshot) {
+  const tc = snapshot?.technicalContext || {};
+  const status = String(tc?.status || "").toLowerCase();
+  const reliability = String(tc?.reliability || "").toLowerCase();
+  const usable = tc?.usableForScenario === true;
+
+  return !tc ||
+    !usable ||
+    status === "missing" ||
+    status === "masked" ||
+    status === "unreliable" ||
+    reliability === "unreliable" ||
+    reliability === "masked";
+}
+
+function sanitizeMaskedTechnicalLeaks(reportText, snapshot) {
+  let text = String(reportText || "");
+  if (!isTechnicalContextMaskedOrUnusable(snapshot)) {
+    return { output: text, anyApplied: false, changes: [] };
+  }
+
+  const changes = [];
+  const maskedLine = "Technical confirmation context: Technical context is masked/unreliable and not usable for scenario evidence; RSI, Stochastic RSI, EMA, MACD, ADX, Bollinger, Keltner, support/resistance, and strategy-module claims must be ignored until usableForScenario=true.";
+
+  // Section 3: replace Technical context table row.
+  const technicalRowRe = /\n\|\s*Technical context\s*\|[^\n]*/i;
+  if (technicalRowRe.test(text)) {
+    text = text.replace(
+      technicalRowRe,
+      "\n| Technical context | Masked/unreliable or unavailable | Not usable as directional evidence | missing |"
+    );
+    changes.push("section3_technical_row_masked");
+  }
+
+  // Sections 4 and 5: replace any line that mentions technical indicators/context.
+  const sanitizeSectionLines = (sectionNumber, nextSectionNumber, title) => {
+    const bounds = extractNumberedSectionBoundaries(text, sectionNumber, nextSectionNumber, title);
+    if (!bounds) return;
+
+    const fixedSection = bounds.section
+      .split("\n")
+      .map((line) => {
+        const lo = String(line || "").toLowerCase();
+        const mentionsTech =
+          lo.includes("technical") ||
+          lo.includes("rsi") ||
+          lo.includes("stoch") ||
+          lo.includes("macd") ||
+          lo.includes("adx") ||
+          lo.includes("ema") ||
+          lo.includes("bollinger") ||
+          lo.includes("keltner") ||
+          lo.includes("support") ||
+          lo.includes("resistance") ||
+          lo.includes("strategy module");
+
+        if (!mentionsTech) return line;
+
+        if (/missing evidence\s*:/i.test(line)) {
+          return line.replace(/event-time technical reaction/ig, "usable technical reaction");
+        }
+
+        if (/Invalidation conditions\s*:/i.test(line)) {
+          return line.replace(/,\s*or if technicals?[^.]*\.?/ig, ".").replace(/\s{2,}/g, " ");
+        }
+
+        changes.push(`section${sectionNumber}_masked_technical_line_sanitized`);
+        const bulletPrefix = /^\s*[-*]\s*/.test(line) ? "- " : "";
+        return `${bulletPrefix}${maskedLine}`;
+      })
+      .join("\n");
+
+    if (fixedSection !== bounds.section) {
+      text = bounds.before + fixedSection + bounds.after;
+    }
+  };
+
+  sanitizeSectionLines(4, 5, "Bullish case for gold");
+  sanitizeSectionLines(5, 6, "Bearish case for gold");
+
+  // Section 7: replace fully with deterministic masked technical text.
+  const section7 = extractNumberedSectionBoundaries(text, 7, 8, "Technical confirmation");
+  if (section7) {
+    const maskedSection7 = `\n7. Technical confirmation\nTechnical context is unreliable/masked and unusable for scenario evidence. Sanity issues: not specified. Technical context must not confirm, weaken, or contradict the macro scenario until usableForScenario=true.\nAlignment note: Technical context is unusable and must not affect scenario direction.\n\n`;
+    text = section7.before + maskedSection7 + section7.after;
+    changes.push("section7_masked_replaced");
+  }
+
+  return {
+    output: text,
+    anyApplied: changes.length > 0,
+    changes: [...new Set(changes)],
+  };
+}
+
+
+
+function ensureBearishCaseTechnicalSupport(reportText, snapshot) {
+  const text = String(reportText || "");
+  const techBias = String(snapshot?.technicalContext?.technicalBias || "").toLowerCase();
+  const usable = snapshot?.technicalContext?.usableForScenario === true;
+  if (techBias !== "bearish" || !usable) return { text, applied: false };
+
+  const sentence = "Technical confirmation context: Technical bias is bearish; therefore it currently supports the bearish conditional case as confirmation context, but it cannot confirm the case without macro/event validation.";
+  if (text.includes(sentence)) return { text, applied: false };
+
+  const bounds = extractNumberedSectionBoundaries(text, 5, 6, "Bearish case for gold");
+  if (!bounds) return { text, applied: false };
+
+  let section = bounds.section;
+
+  // Replace malformed or incomplete technical confirmation context in Section 5.
+  if (/Technical confirmation context\s*:/i.test(section)) {
+    section = section.replace(/^\s*(?:[-*]\s*)?(?:\*{0,2})?Technical confirmation context(?:\*{0,2})?\s*:[^\n]*/im, sentence);
+  } else if (/Missing evidence\s*:/i.test(section)) {
+    section = section.replace(/(\n\s*(?:[-*]\s*)?(?:\*{0,2})?Missing evidence(?:\*{0,2})?\s*:)/i, `\n${sentence}\n$1`);
+  } else {
+    section = section.replace(/\s*$/, `\n${sentence}\n`);
+  }
+
+  return {
+    text: bounds.before + section + bounds.after,
+    applied: section !== bounds.section,
+  };
+}
+
+
+
+function forceGlobalTechnicalConfirmedEvidenceRelabel(reportText, snapshot) {
+  const text = String(reportText || "");
+  const changes = [];
+
+  const fixed = text.split("\n").map((line) => {
+    const original = String(line || "");
+    if (!/Confirmed evidence/i.test(original)) return original;
+    if (isConfirmedEvidenceNoneLine(original)) return original;
+
+    const parsed = parseConfirmedEvidenceLine(original);
+    if (!parsed) return original;
+
+    const body = parsed.body || "";
+    const split = splitEvidenceTextByTechnicalMacro(body);
+
+    const bodyLower = body.toLowerCase();
+    const explicitlyTechnical =
+      bodyLower.includes("technical context") ||
+      bodyLower.includes("technical bias") ||
+      bodyLower.includes("technical analysis") ||
+      bodyLower.includes("technicals") ||
+      bodyLower.includes("yahoo:gc=f") ||
+      bodyLower.includes("gc=f") ||
+      bodyLower.includes("rsi") ||
+      bodyLower.includes("stoch") ||
+      bodyLower.includes("macd") ||
+      bodyLower.includes("adx") ||
+      bodyLower.includes("ema") ||
+      bodyLower.includes("bollinger") ||
+      bodyLower.includes("keltner") ||
+      bodyLower.includes("support") ||
+      bodyLower.includes("resistance") ||
+      bodyLower.includes("strategy module");
+
+    const hasTechnical = !!split.technicalPart || explicitlyTechnical;
+    if (!hasTechnical) return original;
+
+    const bulletPrefix = /^\s*[-*]\s*/.test(parsed.bullet || "") ? "- " : (parsed.bullet || "");
+    const cleanTail = (s) => String(s || "").replace(/[.;,\s]+$/g, "").trim();
+
+    const technicalPart = cleanTail(split.technicalPart || body);
+    const macroPart = cleanTail(split.macroPart || "");
+
+    // If there is a macro part, avoid leaving it as Confirmed evidence under weak/date-only context.
+    if (macroPart && macroPart.toLowerCase() !== technicalPart.toLowerCase()) {
+      changes.push("global_mixed_technical_confirmed_evidence_relabel");
+      const conditional =
+        shouldDowngradeMacroConfirmedEvidence(snapshot)
+          ? `${bulletPrefix}Conditional evidence: Macro context is supportive, but event outcomes, forecast/actual values, and replay confirmation are still missing/inconclusive.`
+          : `${bulletPrefix}Conditional evidence: ${macroPart}.`;
+      return `${conditional}\n${bulletPrefix}Technical confirmation context: ${technicalPart}.`;
+    }
+
+    changes.push("global_technical_confirmed_evidence_relabel");
+    return `${bulletPrefix}Technical confirmation context: ${technicalPart}.`;
+  }).join("\n");
+
+  return {
+    output: fixed,
+    anyApplied: changes.length > 0,
+    changes: [...new Set(changes)],
+  };
+}
+
+
+function applyPostProcessedOutputCleanup(reportText, snapshot) {
+  let text = String(reportText || "");
+  const changes = [];
+
+  const employment = injectEmploymentEventRowIntoEvidenceTable(text, snapshot);
+  if (employment.applied) {
+    text = employment.text;
+    changes.push("employment_event_row_injected");
+  }
+
+  const bullishTech = ensureBullishCaseTechnicalWeakening(text, snapshot);
+  if (bullishTech.applied) {
+    text = bullishTech.text;
+    changes.push("bullish_case_technical_weakening_inserted");
+  }
+
+  const nfpInvalidation = normalizeNfpDirectionalInvalidationPhrases(text);
+  if (nfpInvalidation.anyApplied) {
+    text = nfpInvalidation.output;
+    changes.push(...nfpInvalidation.changes.map((x) => `nfp_directional_invalidation:${x}`));
+  }
+
+  const bearishTechSupport = ensureBearishCaseTechnicalSupport(text, snapshot);
+  if (bearishTechSupport.applied) {
+    text = bearishTechSupport.text;
+    changes.push("bearish_case_technical_support_inserted");
+  }
+
+  const avoid = enforceExactAvoidWindowInSection9(text, snapshot);
+  if (avoid.applied) {
+    text = avoid.text;
+    changes.push("avoid_window_exact_replaced");
   }
 
   return {
@@ -10310,10 +10968,14 @@ ${JSON.stringify(data, null, 2)}`);
             setAiStatus(out.trim().toUpperCase() === "OK" ? "smoke test OK" : "smoke test returned non-OK output");
           } else {
             const snapshotForValidation = contextSnapshot || buildGoldScopeContextSnapshot();
-            const section7PostProcessed = replaceSection7WithDeterministicTechnicalConfirmation(out, snapshotForValidation);
-            const sanitized = sanitizeRawAiTechnicalEvidenceLanguage(section7PostProcessed, snapshotForValidation);
+            const sanitized = sanitizeRawAiTechnicalEvidenceLanguage(out, snapshotForValidation);
             const scenarioPostProcessed = applyScenarioHeaderAndTechnicalLabelPostProcessing(sanitized.output, snapshotForValidation);
-            const outputForValidation = scenarioPostProcessed.output;
+            const cleanupPostProcessed = applyPostProcessedOutputCleanup(scenarioPostProcessed.output, snapshotForValidation);
+            const finalConfirmedEvidenceSafety = forceRelabelRemainingTechnicalConfirmedEvidence(cleanupPostProcessed.output, snapshotForValidation);
+            const section7PostProcessed = replaceSection7WithDeterministicTechnicalConfirmation(finalConfirmedEvidenceSafety.text, snapshotForValidation);
+            const maskedTechnicalSanitized = sanitizeMaskedTechnicalLeaks(section7PostProcessed, snapshotForValidation);
+            const globalTechnicalConfirmedRelabel = forceGlobalTechnicalConfirmedEvidenceRelabel(maskedTechnicalSanitized.output, snapshotForValidation);
+            const outputForValidation = globalTechnicalConfirmedRelabel.output;
             const validation = validateAiGoldReport(outputForValidation, snapshotForValidation);
             const validationText = formatValidationReport(validation);
             const highSeverity = validation.issues.some((i) => i.severity === "high");
@@ -10324,18 +10986,30 @@ ${JSON.stringify(data, null, 2)}`);
               setAiOutput(`${safeReport}${debugSnippets}`);
               setAiStatus("AI rejected: safe report generated");
             } else {
-              const section7Note = section7PostProcessed !== out
-                ? "\n\n---\nDETERMINISTIC SECTION 7 POST-PROCESSOR\nSection 7 Technical confirmation was replaced with deterministic technicalConfirmationText. Macro, bullish/bearish cases, decision gates, and final note were not changed."
+              const section7Note = section7PostProcessed !== finalConfirmedEvidenceSafety.text
+                ? "\n\n---\nDETERMINISTIC SECTION 7 POST-PROCESSOR\nSection 7 Technical confirmation was replaced with deterministic technicalConfirmationText after sanitizer/cleanup. Macro, bullish/bearish cases, decision gates, and final note were not changed."
                 : "";
               const scenarioPostProcessingNote = scenarioPostProcessed.anyApplied
                 ? `\n\n---\nSCENARIO HEADER + TECHNICAL LABEL POST-PROCESSOR\nApplied changes: ${scenarioPostProcessed.changes.join(", ")}. Decision gates, next catalyst, final note, Safe Report logic, validators, macro logic, indicators, and strategy modules were not changed.`
+                : "";
+              const cleanupPostProcessingNote = cleanupPostProcessed.anyApplied
+                ? `\n\n---\nPOST-PROCESSED OUTPUT CLEANUP\nApplied changes: ${cleanupPostProcessed.changes.join(", ")}. Validators, macro logic, employment data logic, indicators, and strategy modules were not changed.`
+                : "";
+              const finalConfirmedEvidenceSafetyNote = finalConfirmedEvidenceSafety.applied
+                ? `\n\n---\nFINAL CONFIRMED-EVIDENCE SAFETY PASS\nApplied changes: ${finalConfirmedEvidenceSafety.changes.join(", ")}. Remaining technical Confirmed evidence labels in Sections 4/5 were forced to Technical confirmation context before validation.`
+                : "";
+              const maskedTechnicalSanitizerNote = maskedTechnicalSanitized.anyApplied
+                ? `\n\n---\nMASKED TECHNICAL LEAK SANITIZER\nApplied changes: ${maskedTechnicalSanitized.changes.join(", ")}. Technical claims were removed because technicalContext was masked/unusable for scenario analysis.`
+                : "";
+              const globalTechnicalConfirmedRelabelNote = globalTechnicalConfirmedRelabel.anyApplied
+                ? `\n\n---\nGLOBAL TECHNICAL CONFIRMED-EVIDENCE RELABEL\nApplied changes: ${globalTechnicalConfirmedRelabel.changes.join(", ")}. Any remaining technical Confirmed evidence labels were converted before validation.`
                 : "";
               const sanitizerNote = sanitized.applied
                 ? `\n\n---\nRAW AI TECHNICAL LANGUAGE SANITIZER\nApplied technical-language cleanup only: ${sanitized.changes.join(", ")}. Macro/event logic was not changed.`
                 : "";
               const decorated = validation.issues.length
-                ? `${outputForValidation}${section7Note}${scenarioPostProcessingNote}${sanitizerNote}\n\n---\n${validationText}`
-                : `${outputForValidation}${section7Note}${scenarioPostProcessingNote}${sanitizerNote}`;
+                ? `${outputForValidation}${section7Note}${scenarioPostProcessingNote}${cleanupPostProcessingNote}${finalConfirmedEvidenceSafetyNote}${maskedTechnicalSanitizerNote}${globalTechnicalConfirmedRelabelNote}${sanitizerNote}\n\n---\n${validationText}`
+                : `${outputForValidation}${section7Note}${scenarioPostProcessingNote}${cleanupPostProcessingNote}${finalConfirmedEvidenceSafetyNote}${maskedTechnicalSanitizerNote}${globalTechnicalConfirmedRelabelNote}${sanitizerNote}`;
               setAiOutput(decorated);
               setAiStatus(validation.ok
                 ? (outputForValidation.includes("<END_GOLDSCOPE_REPORT>") ? "complete + validation passed" : "complete, but end marker missing")
@@ -10385,7 +11059,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.1.2",
+        appVersion: "GoldScope v2.41.1.10.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -10536,7 +11210,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Bare RSI extreme validator: on</Badge>
               <Badge value="supportive">Candlestick pattern layer: on</Badge>
               <Badge value="supportive">Prompt runtime reliability: on</Badge>
-              <Badge value="supportive">Safe report evidence wording: on</Badge>\n              <Badge value="supportive">Comparator exclusion: on</Badge>\n              <Badge value="supportive">Replay signal normalization: on</Badge>\n              <Badge value="supportive">Technical numeric grounding: on</Badge>\n              <Badge value="supportive">Deterministic technical section: on</Badge>\n              <Badge value="supportive">Section 7 post-processor: on</Badge>\n              <Badge value="supportive">Scenario header post-processor: on</Badge>\n              <Badge value="supportive">Employment event intelligence: on</Badge>\n              <Badge value="supportive">FRED employment backfill: on</Badge>
+              <Badge value="supportive">Safe report evidence wording: on</Badge>\n              <Badge value="supportive">Comparator exclusion: on</Badge>\n              <Badge value="supportive">Replay signal normalization: on</Badge>\n              <Badge value="supportive">Technical numeric grounding: on</Badge>\n              <Badge value="supportive">Deterministic technical section: on</Badge>\n              <Badge value="supportive">Section 7 post-processor: on</Badge>\n              <Badge value="supportive">Scenario header post-processor: on</Badge>\n              <Badge value="supportive">Employment event intelligence: on</Badge>\n              <Badge value="supportive">FRED employment backfill: on</Badge>\n              <Badge value="supportive">Employment-aware Safe Report: on</Badge>\n              <Badge value="supportive">Safe Report init-order fix: on</Badge>\n              <Badge value="supportive">Output cleanup post-processor: on</Badge>\n              <Badge value="supportive">Bold-colon evidence relabel: on</Badge>\n              <Badge value="supportive">Macro confirmed-evidence downgrade: on</Badge>\n              <Badge value="supportive">Final confirmed-evidence safety pass: on</Badge>\n              <Badge value="supportive">NFP invalidation direction guard: on</Badge>\n              <Badge value="supportive">Masked technical leak sanitizer: on</Badge>\n              <Badge value="supportive">Bearish-case technical wording fix: on</Badge>\n              <Badge value="supportive">Global technical confirmed-evidence relabel: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -10565,7 +11239,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">StochRSI exclusion preserved: on</Badge>
               <Badge value="supportive">Candlestick confirmation-only: on</Badge>
               <Badge value="supportive">Optional think stop tokens: off</Badge>
-              <Badge value="supportive">RSI parser cleanup: on</Badge>\n              <Badge value="supportive">Technical numeric measured-only: on</Badge>\n              <Badge value="supportive">Technical safe wording cleanup: on</Badge>\n              <Badge value="supportive">Allowed RSI/StochRSI facts: on</Badge>\n              <Badge value="supportive">Section 7 copy-exact: on</Badge>\n              <Badge value="supportive">Pre-validation Section 7 replacement: on</Badge>\n              <Badge value="supportive">Mixed technical label splitter: on</Badge>\n              <Badge value="supportive">Labor composition analyzer: on</Badge>\n              <Badge value="supportive">Labor data readiness fix: on</Badge>
+              <Badge value="supportive">RSI parser cleanup: on</Badge>\n              <Badge value="supportive">Technical numeric measured-only: on</Badge>\n              <Badge value="supportive">Technical safe wording cleanup: on</Badge>\n              <Badge value="supportive">Allowed RSI/StochRSI facts: on</Badge>\n              <Badge value="supportive">Section 7 copy-exact: on</Badge>\n              <Badge value="supportive">Pre-validation Section 7 replacement: on</Badge>\n              <Badge value="supportive">Mixed technical label splitter: on</Badge>\n              <Badge value="supportive">Labor composition analyzer: on</Badge>\n              <Badge value="supportive">Labor data readiness fix: on</Badge>\n              <Badge value="supportive">Markdown evidence relabel fix: on</Badge>\n              <Badge value="supportive">Employment report injection: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>
               <Badge value="supportive">Technical sanity: on</Badge>
               <Badge value="supportive">NFP direction validator: on</Badge>\n              <Badge value="supportive">Technical masking: on</Badge>
@@ -10612,7 +11286,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">Bare RSI extreme validator: on</Badge>
               <Badge value="supportive">Candlestick pattern layer: on</Badge>
               <Badge value="supportive">Prompt runtime reliability: on</Badge>
-              <Badge value="supportive">Safe report evidence wording: on</Badge>\n              <Badge value="supportive">Comparator exclusion: on</Badge>\n              <Badge value="supportive">Replay signal normalization: on</Badge>\n              <Badge value="supportive">Technical numeric grounding: on</Badge>\n              <Badge value="supportive">Deterministic technical section: on</Badge>\n              <Badge value="supportive">Section 7 post-processor: on</Badge>\n              <Badge value="supportive">Scenario header post-processor: on</Badge>\n              <Badge value="supportive">Employment event intelligence: on</Badge>\n              <Badge value="supportive">FRED employment backfill: on</Badge>
+              <Badge value="supportive">Safe report evidence wording: on</Badge>\n              <Badge value="supportive">Comparator exclusion: on</Badge>\n              <Badge value="supportive">Replay signal normalization: on</Badge>\n              <Badge value="supportive">Technical numeric grounding: on</Badge>\n              <Badge value="supportive">Deterministic technical section: on</Badge>\n              <Badge value="supportive">Section 7 post-processor: on</Badge>\n              <Badge value="supportive">Scenario header post-processor: on</Badge>\n              <Badge value="supportive">Employment event intelligence: on</Badge>\n              <Badge value="supportive">FRED employment backfill: on</Badge>\n              <Badge value="supportive">Employment-aware Safe Report: on</Badge>\n              <Badge value="supportive">Safe Report init-order fix: on</Badge>\n              <Badge value="supportive">Output cleanup post-processor: on</Badge>\n              <Badge value="supportive">Bold-colon evidence relabel: on</Badge>\n              <Badge value="supportive">Macro confirmed-evidence downgrade: on</Badge>\n              <Badge value="supportive">Final confirmed-evidence safety pass: on</Badge>\n              <Badge value="supportive">NFP invalidation direction guard: on</Badge>\n              <Badge value="supportive">Masked technical leak sanitizer: on</Badge>\n              <Badge value="supportive">Bearish-case technical wording fix: on</Badge>\n              <Badge value="supportive">Global technical confirmed-evidence relabel: on</Badge>
               <Badge value="supportive">Run readiness gate: on</Badge>
               <Badge value="supportive">Replay init fix: on</Badge>
               <Badge value="supportive">AI Engine crash fix: on</Badge>
@@ -10641,7 +11315,7 @@ ${err.stack || err.message || String(err)}`);
               <Badge value="supportive">StochRSI exclusion preserved: on</Badge>
               <Badge value="supportive">Candlestick confirmation-only: on</Badge>
               <Badge value="supportive">Optional think stop tokens: off</Badge>
-              <Badge value="supportive">RSI parser cleanup: on</Badge>\n              <Badge value="supportive">Technical numeric measured-only: on</Badge>\n              <Badge value="supportive">Technical safe wording cleanup: on</Badge>\n              <Badge value="supportive">Allowed RSI/StochRSI facts: on</Badge>\n              <Badge value="supportive">Section 7 copy-exact: on</Badge>\n              <Badge value="supportive">Pre-validation Section 7 replacement: on</Badge>\n              <Badge value="supportive">Mixed technical label splitter: on</Badge>\n              <Badge value="supportive">Labor composition analyzer: on</Badge>\n              <Badge value="supportive">Labor data readiness fix: on</Badge>
+              <Badge value="supportive">RSI parser cleanup: on</Badge>\n              <Badge value="supportive">Technical numeric measured-only: on</Badge>\n              <Badge value="supportive">Technical safe wording cleanup: on</Badge>\n              <Badge value="supportive">Allowed RSI/StochRSI facts: on</Badge>\n              <Badge value="supportive">Section 7 copy-exact: on</Badge>\n              <Badge value="supportive">Pre-validation Section 7 replacement: on</Badge>\n              <Badge value="supportive">Mixed technical label splitter: on</Badge>\n              <Badge value="supportive">Labor composition analyzer: on</Badge>\n              <Badge value="supportive">Labor data readiness fix: on</Badge>\n              <Badge value="supportive">Markdown evidence relabel fix: on</Badge>\n              <Badge value="supportive">Employment report injection: on</Badge>
               <Badge value="supportive">Replay tab crash fix: on</Badge>\n              <Badge value="supportive">Prompt builder fix: on</Badge>
             </div>
           </Card>
@@ -10728,7 +11402,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.1.2",
+        appVersion: "GoldScope v2.41.1.10.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -10931,7 +11605,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.1.2",
+        appVersion: "GoldScope v2.41.1.10.2",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -11225,7 +11899,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.1.2</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.1.10.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>

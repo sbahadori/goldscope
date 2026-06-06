@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.41.1 - FRED Employment Backfill + Labor Data Readiness Fix
+title GoldScope v2.41.1.10 - Global Technical Confirmed Evidence Relabel
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.41.1 - FRED Employment Backfill + Labor Data Readiness Fix
+echo   GoldScope v2.41.1.10 - Global Technical Confirmed Evidence Relabel
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.
