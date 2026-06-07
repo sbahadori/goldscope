@@ -3276,8 +3276,24 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
         support: support.filter((x) => Number.isFinite(x) && x > 0),
         resistance: resistance.filter((x) => Number.isFinite(x) && x > 0),
         structure: trend === "neutral/range" ? "range/unclear" : trend,
+        candles: c.slice(-600).map((x) => ({
+          time: x.time,
+          open: round2(x.open),
+          high: round2(x.high),
+          low: round2(x.low),
+          close: round2(x.close),
+          volume: Number.isFinite(Number(x.volume)) ? Number(x.volume) : null,
+        })),
       },
     },
+    candles: c.slice(-600).map((x) => ({
+      time: x.time,
+      open: round2(x.open),
+      high: round2(x.high),
+      low: round2(x.low),
+      close: round2(x.close),
+      volume: Number.isFinite(Number(x.volume)) ? Number(x.volume) : null,
+    })),
     technicalLanguageHints,
     technicalIndicators: {
       available: true,
@@ -3301,7 +3317,7 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
 async function fetchStooqDaily(symbol = "xauusd") {
   const end = new Date();
   const start = new Date();
-  start.setDate(end.getDate() - 260);
+  start.setDate(end.getDate() - 370);
   const fmt = (d) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
   const url = `/api/stooq/q/d/l/?s=${encodeURIComponent(symbol)}&d1=${fmt(start)}&d2=${fmt(end)}&i=d`;
   const res = await fetch(url, { cache: "no-store" });
@@ -3328,11 +3344,13 @@ async function fetchStooqDaily(symbol = "xauusd") {
 
 async function loadBestTechnicalCandles() {
   const candidates = [
+    { sourceName: "Yahoo", symbol: "XAUUSD=X", range: "1y", interval: "1h", fetcher: () => fetchYahooChart("XAUUSD=X", "1y", "1h") },
+    { sourceName: "Yahoo", symbol: "GC=F", range: "1y", interval: "1h", fetcher: () => fetchYahooChart("GC=F", "1y", "1h") },
     { sourceName: "Yahoo", symbol: "XAUUSD=X", range: "90d", interval: "1h", fetcher: () => fetchYahooChart("XAUUSD=X", "90d", "1h") },
-    { sourceName: "Yahoo", symbol: "XAUUSD=X", range: "1y", interval: "1d", fetcher: () => fetchYahooChart("XAUUSD=X", "1y", "1d") },
     { sourceName: "Yahoo", symbol: "GC=F", range: "90d", interval: "1h", fetcher: () => fetchYahooChart("GC=F", "90d", "1h") },
+    { sourceName: "Yahoo", symbol: "XAUUSD=X", range: "1y", interval: "1d", fetcher: () => fetchYahooChart("XAUUSD=X", "1y", "1d") },
     { sourceName: "Yahoo", symbol: "GC=F", range: "1y", interval: "1d", fetcher: () => fetchYahooChart("GC=F", "1y", "1d") },
-    { sourceName: "Stooq", symbol: "xauusd", range: "260d", interval: "1d", fetcher: () => fetchStooqDaily("xauusd") },
+    { sourceName: "Stooq", symbol: "xauusd", range: "370d", interval: "1d", fetcher: () => fetchStooqDaily("xauusd") },
   ];
 
   const attempts = [];
@@ -6186,6 +6204,7 @@ export default function App() {
   const tabs = [
     ["control", "Home"],
     ["chart", "Chart"],
+    ["technical", "Technical"],
     ["eventRisk", "Events"],
     ["scenarioLab", "Scenario"],
     ["aiEngine", "AI Analysis"],
@@ -6204,7 +6223,1224 @@ export default function App() {
     cursor: disabled ? "not-allowed" : "pointer",
   });
 
-  function Overview() {
+
+  
+class TechnicalPanelErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error("Technical panel render error", error, info);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <Card>
+          <Title icon="⚠️" title="Technical panel error" sub="The Technical UI failed to render, but the analysis engine is not affected." />
+          <p style={{ color: C.red, lineHeight: 1.7 }}>
+            {String(this.state.error?.message || this.state.error)}
+          </p>
+          <p style={{ color: C.muted, lineHeight: 1.7 }}>
+            This is a UI-only failure. Report generation, validators, macro logic, employment logic, and BLS parser are unchanged.
+          </p>
+        </Card>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function TechnicalDashboardPanelBody() {
+    const readSnapshot = () => {
+      try {
+        const raw = localStorage.getItem("goldscope.latestSnapshot.v1");
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const [snapshot, setSnapshot] = useState(() => readSnapshot());
+    const [error, setError] = useState("");
+    const [selectedTf, setSelectedTf] = useState(() => {
+      try { return localStorage.getItem("goldscope.technical.selectedTf") || "1h"; } catch { return "1h"; }
+    });
+    const [displayCandleCount, setDisplayCandleCount] = useState(() => {
+      try { return Number(localStorage.getItem("goldscope.technical.candleCount") || 240); } catch { return 240; }
+    });
+    const [hoverIndex, setHoverIndex] = useState(null);
+    const [chartMaximized, setChartMaximized] = useState(false);
+    const [zoomEndIndex, setZoomEndIndex] = useState(null);
+    const [isPanning, setIsPanning] = useState(false);
+    const [panStart, setPanStart] = useState(null);
+
+    useEffect(() => {
+      const onKeyDown = (event) => {
+        if (event.key === "Escape") setChartMaximized(false);
+      };
+      window.addEventListener("keydown", onKeyDown);
+      return () => window.removeEventListener("keydown", onKeyDown);
+    }, []);
+
+    const refreshSnapshot = () => {
+      try {
+        setError("");
+        setSnapshot(readSnapshot());
+      } catch (err) {
+        setError(String(err?.message || err));
+      }
+    };
+
+    const fmt = (value, fallback = "n/a") => {
+      const n = Number(value);
+      if (Number.isFinite(n)) return round2(n);
+      if (value === 0) return "0";
+      if (value === null || value === undefined || value === "") return fallback;
+      return String(value);
+    };
+
+    const get = (obj, path, fallback = undefined) => {
+      try {
+        const result = String(path).split(".").reduce((acc, key) => (acc == null ? undefined : acc[key]), obj);
+        return result === undefined || result === null ? fallback : result;
+      } catch {
+        return fallback;
+      }
+    };
+
+    const tech = snapshot?.technicalContext || null;
+    const timeframes = tech?.timeframes && typeof tech.timeframes === "object" ? tech.timeframes : {};
+    const availableTfs = Object.keys(timeframes);
+    const tfKey = timeframes[selectedTf] ? selectedTf : (timeframes["1h"] ? "1h" : availableTfs[0] || "");
+    const tf = tfKey ? timeframes[tfKey] || {} : {};
+    const setTfSafe = (value) => {
+      setSelectedTf(value);
+      try { localStorage.setItem("goldscope.technical.selectedTf", value); } catch {}
+    };
+    const setCandleCountSafe = (value) => {
+      const n = Math.max(20, Math.min(600, Number(value) || 240));
+      setDisplayCandleCount(n);
+      // Do not reference storedCandles here; it is declared later in this component.
+      // The visible window is recalculated after render.
+      try { localStorage.setItem("goldscope.technical.candleCount", String(n)); } catch {}
+    };
+
+    const sourceName = get(tech, "sourceSelection.selected.sourceName", tech?.sourceName || "unknown");
+    const symbol = get(tech, "sourceSelection.selected.symbol", tech?.symbol || "unknown");
+    const source = `${sourceName}:${symbol}`;
+    const status = tech?.status || "missing";
+    const bias = tech?.technicalBias || tf?.technicalBias || "unknown";
+    const biasLower = String(bias).toLowerCase();
+    const biasBadge = biasLower.includes("bear") ? "negative" : biasLower.includes("bull") ? "supportive" : "warning";
+
+    const levelRows = [
+      ["Price", tf?.lastPrice],
+      ["EMA20", tf?.ema20],
+      ["EMA50", tf?.ema50],
+      ["EMA200", tf?.ema200],
+      ["BB upper", get(tf, "bollinger20.upper")],
+      ["BB middle", get(tf, "bollinger20.middle")],
+      ["BB lower", get(tf, "bollinger20.lower")],
+      ["KC upper", get(tf, "keltner20.upper")],
+      ["KC middle", get(tf, "keltner20.middle")],
+      ["KC lower", get(tf, "keltner20.lower")],
+      ...(Array.isArray(tf?.support) ? tf.support.slice(0, 3).map((v, i) => [`Support ${i + 1}`, v]) : []),
+      ...(Array.isArray(tf?.resistance) ? tf.resistance.slice(0, 3).map((v, i) => [`Resistance ${i + 1}`, v]) : []),
+    ].map(([label, value]) => ({ label, value: Number(value) })).filter((x) => Number.isFinite(x.value));
+
+    const rawCandles =
+      (Array.isArray(tf?.candles) && tf.candles) ||
+      (Array.isArray(tf?.ohlc) && tf.ohlc) ||
+      (Array.isArray(tf?.ohlcv) && tf.ohlcv) ||
+      (Array.isArray(tech?.candles) && tech.candles) ||
+      (Array.isArray(tech?.ohlc) && tech.ohlc) ||
+      [];
+
+    const storedCandles = rawCandles
+      .map((c, i) => {
+        const open = Number(c.open ?? c.o);
+        const high = Number(c.high ?? c.h);
+        const low = Number(c.low ?? c.l);
+        const close = Number(c.close ?? c.c);
+        const time = c.time ?? c.date ?? c.datetime ?? c.timestamp ?? i;
+        const volume = Number(c.volume ?? c.v);
+        return { open, high, low, close, time, volume };
+      })
+      .filter((c) => [c.open, c.high, c.low, c.close].every(Number.isFinite));
+
+    const viewportSize = Math.max(20, Math.min(600, Number(displayCandleCount) || 240));
+    const rawEndIndex = Number.isFinite(zoomEndIndex) ? zoomEndIndex : storedCandles.length;
+    const visibleEndIndex = Math.max(0, Math.min(storedCandles.length, rawEndIndex));
+    const visibleStartIndex = Math.max(0, visibleEndIndex - viewportSize);
+    const candles = storedCandles.slice(visibleStartIndex, visibleEndIndex);
+    const canPanLeft = visibleStartIndex > 0;
+    const canPanRight = visibleEndIndex < storedCandles.length;
+
+    const allChartValues = [
+      ...levelRows.map((x) => x.value),
+      ...candles.flatMap((c) => [c.open, c.high, c.low, c.close]),
+    ].filter(Number.isFinite);
+
+    const min = allChartValues.length ? Math.min(...allChartValues) : 0;
+    const max = allChartValues.length ? Math.max(...allChartValues) : 1;
+    const span = Math.max(max - min, 1);
+    const yFor = (value) => 214 - ((value - min) / span) * 176;
+
+    const closeValues = candles.map((c) => c.close);
+    const highValues = candles.map((c) => c.high);
+    const lowValues = candles.map((c) => c.low);
+    const volumeValues = candles.map((c) => Number(c.volume)).map((v) => Number.isFinite(v) ? v : 0);
+    const maxVolume = volumeValues.length ? Math.max(...volumeValues, 1) : 1;
+
+    const makeEmaSeries = (values, period) => {
+      const k = 2 / (period + 1);
+      let ema = null;
+      return values.map((v, i) => {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return null;
+        if (ema === null) ema = n;
+        else ema = n * k + ema * (1 - k);
+        return Number.isFinite(ema) ? ema : null;
+      });
+    };
+
+    const makeRsiSeries = (values, period = 14) => {
+      const out = Array(values.length).fill(null);
+      if (values.length <= period) return out;
+      let gain = 0;
+      let loss = 0;
+      for (let i = 1; i <= period; i++) {
+        const ch = values[i] - values[i - 1];
+        if (ch >= 0) gain += ch;
+        else loss -= ch;
+      }
+      let avgGain = gain / period;
+      let avgLoss = loss / period;
+      out[period] = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+      for (let i = period + 1; i < values.length; i++) {
+        const ch = values[i] - values[i - 1];
+        const g = ch > 0 ? ch : 0;
+        const l = ch < 0 ? -ch : 0;
+        avgGain = (avgGain * (period - 1) + g) / period;
+        avgLoss = (avgLoss * (period - 1) + l) / period;
+        out[i] = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+      }
+      return out;
+    };
+
+    const makeMacdSeries = (values) => {
+      const fast = makeEmaSeries(values, 12);
+      const slow = makeEmaSeries(values, 26);
+      const macd = values.map((_, i) => Number.isFinite(fast[i]) && Number.isFinite(slow[i]) ? fast[i] - slow[i] : null);
+      const cleanMacd = macd.map((v) => Number.isFinite(v) ? v : 0);
+      const signalRaw = makeEmaSeries(cleanMacd, 9);
+      const signal = macd.map((v, i) => Number.isFinite(v) ? signalRaw[i] : null);
+      const hist = macd.map((v, i) => Number.isFinite(v) && Number.isFinite(signal[i]) ? v - signal[i] : null);
+      return { macd, signal, hist };
+    };
+
+    const makeAdxSeries = (highs, lows, closes, period = 14) => {
+      const len = closes.length;
+      const plusDi = Array(len).fill(null);
+      const minusDi = Array(len).fill(null);
+      const adx = Array(len).fill(null);
+      if (len <= period + 1) return { adx, plusDi, minusDi };
+      let trSum = 0, plusSum = 0, minusSum = 0;
+      const dx = Array(len).fill(null);
+      for (let i = 1; i < len; i++) {
+        const high = highs[i], low = lows[i], prevHigh = highs[i - 1], prevLow = lows[i - 1], prevClose = closes[i - 1];
+        const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
+        const upMove = high - prevHigh;
+        const downMove = prevLow - low;
+        const plusDm = upMove > downMove && upMove > 0 ? upMove : 0;
+        const minusDm = downMove > upMove && downMove > 0 ? downMove : 0;
+
+        if (i <= period) {
+          trSum += tr; plusSum += plusDm; minusSum += minusDm;
+        } else {
+          trSum = trSum - trSum / period + tr;
+          plusSum = plusSum - plusSum / period + plusDm;
+          minusSum = minusSum - minusSum / period + minusDm;
+        }
+
+        if (i >= period && trSum > 0) {
+          plusDi[i] = 100 * (plusSum / trSum);
+          minusDi[i] = 100 * (minusSum / trSum);
+          const denom = plusDi[i] + minusDi[i];
+          dx[i] = denom > 0 ? 100 * Math.abs(plusDi[i] - minusDi[i]) / denom : null;
+        }
+      }
+
+      let dxCount = 0;
+      let dxSum = 0;
+      for (let i = period; i < len; i++) {
+        if (!Number.isFinite(dx[i])) continue;
+        if (dxCount < period) {
+          dxSum += dx[i];
+          dxCount++;
+          if (dxCount === period) adx[i] = dxSum / period;
+        } else {
+          const prevAdx = adx[i - 1] ?? dxSum / period;
+          adx[i] = ((prevAdx * (period - 1)) + dx[i]) / period;
+        }
+      }
+      return { adx, plusDi, minusDi };
+    };
+
+    const ema20Series = makeEmaSeries(closeValues, 20);
+    const ema50Series = makeEmaSeries(closeValues, 50);
+    const ema200Series = makeEmaSeries(closeValues, 200);
+    const rsiSeries = makeRsiSeries(closeValues, 14);
+    const macdSeries = makeMacdSeries(closeValues);
+    const adxSeries = makeAdxSeries(highValues, lowValues, closeValues, 14);
+    const hoveredCandle = Number.isInteger(hoverIndex) && candles[hoverIndex] ? candles[hoverIndex] : null;
+
+    const lastFinite = (arr) => {
+      for (let i = arr.length - 1; i >= 0; i--) {
+        if (Number.isFinite(arr[i])) return arr[i];
+      }
+      return null;
+    };
+
+    const currentRsi = lastFinite(rsiSeries);
+    const currentMacd = lastFinite(macdSeries.macd);
+    const currentSignal = lastFinite(macdSeries.signal);
+    const currentHist = lastFinite(macdSeries.hist);
+    const currentAdx = lastFinite(adxSeries.adx);
+    const currentPlusDi = lastFinite(adxSeries.plusDi);
+    const currentMinusDi = lastFinite(adxSeries.minusDi);
+
+    const hoveredVolume = Number.isInteger(hoverIndex) && Number.isFinite(volumeValues[hoverIndex]) ? volumeValues[hoverIndex] : null;
+    const hoveredRsi = Number.isInteger(hoverIndex) && Number.isFinite(rsiSeries[hoverIndex]) ? rsiSeries[hoverIndex] : null;
+    const hoveredMacd = Number.isInteger(hoverIndex) && Number.isFinite(macdSeries.macd[hoverIndex]) ? macdSeries.macd[hoverIndex] : null;
+    const hoveredSignal = Number.isInteger(hoverIndex) && Number.isFinite(macdSeries.signal[hoverIndex]) ? macdSeries.signal[hoverIndex] : null;
+    const hoveredHist = Number.isInteger(hoverIndex) && Number.isFinite(macdSeries.hist[hoverIndex]) ? macdSeries.hist[hoverIndex] : null;
+    const hoveredAdx = Number.isInteger(hoverIndex) && Number.isFinite(adxSeries.adx[hoverIndex]) ? adxSeries.adx[hoverIndex] : null;
+    const hoveredPlusDi = Number.isInteger(hoverIndex) && Number.isFinite(adxSeries.plusDi[hoverIndex]) ? adxSeries.plusDi[hoverIndex] : null;
+    const hoveredMinusDi = Number.isInteger(hoverIndex) && Number.isFinite(adxSeries.minusDi[hoverIndex]) ? adxSeries.minusDi[hoverIndex] : null;
+
+    const selectedIndex = Number.isInteger(hoverIndex) && candles[hoverIndex] ? hoverIndex : Math.max(0, candles.length - 1);
+    const selectedCandle = candles[selectedIndex] || null;
+    const selectedVolume = Number.isInteger(selectedIndex) && Number.isFinite(volumeValues[selectedIndex]) ? volumeValues[selectedIndex] : null;
+    const selectedRsi = Number.isInteger(selectedIndex) && Number.isFinite(rsiSeries[selectedIndex]) ? rsiSeries[selectedIndex] : null;
+    const selectedMacd = Number.isInteger(selectedIndex) && Number.isFinite(macdSeries.macd[selectedIndex]) ? macdSeries.macd[selectedIndex] : null;
+    const selectedSignal = Number.isInteger(selectedIndex) && Number.isFinite(macdSeries.signal[selectedIndex]) ? macdSeries.signal[selectedIndex] : null;
+    const selectedHist = Number.isInteger(selectedIndex) && Number.isFinite(macdSeries.hist[selectedIndex]) ? macdSeries.hist[selectedIndex] : null;
+    const selectedAdx = Number.isInteger(selectedIndex) && Number.isFinite(adxSeries.adx[selectedIndex]) ? adxSeries.adx[selectedIndex] : null;
+    const selectedPlusDi = Number.isInteger(selectedIndex) && Number.isFinite(adxSeries.plusDi[selectedIndex]) ? adxSeries.plusDi[selectedIndex] : null;
+    const selectedMinusDi = Number.isInteger(selectedIndex) && Number.isFinite(adxSeries.minusDi[selectedIndex]) ? adxSeries.minusDi[selectedIndex] : null;
+
+    const nonZeroVolumes = volumeValues.filter((v) => Number.isFinite(v) && v > 0);
+    const volumeValid = nonZeroVolumes.length >= Math.max(10, Math.floor(candles.length * 0.25));
+    const volumePanelNote = volumeValid ? "Volume" : "Volume unavailable / weak from selected provider";
+
+    const clusterLevelZone = (levels = []) => {
+      const nums = (Array.isArray(levels) ? levels : [])
+        .map(Number)
+        .filter(Number.isFinite)
+        .sort((a, b) => a - b);
+      if (!nums.length) return [];
+      const threshold = Math.max(8, (max - min) * 0.006);
+      const clusters = [];
+      nums.forEach((n) => {
+        const last = clusters[clusters.length - 1];
+        if (!last || Math.abs(n - last[last.length - 1]) > threshold) clusters.push([n]);
+        else last.push(n);
+      });
+      return clusters.map((group, i) => ({
+        label: group.length > 1 ? `Zone ${i + 1}` : `Level ${i + 1}`,
+        low: Math.min(...group),
+        high: Math.max(...group),
+        mid: group.reduce((a, b) => a + b, 0) / group.length,
+        count: group.length,
+      }));
+    };
+
+    const supportZones = clusterLevelZone(tf.support);
+    const resistanceZones = clusterLevelZone(tf.resistance);
+
+    const chartX0 = 78;
+    const chartW = 705;
+    const panelW = 745;
+    const xForIndex = (i) => chartX0 + (candles.length > 1 ? i * (chartW / Math.max(candles.length - 1, 1)) : chartW / 2);
+
+    const applyWheelZoom = (event) => {
+      if (!storedCandles.length) return;
+      event.preventDefault();
+      const direction = event.deltaY > 0 ? 1 : -1;
+      const factor = direction > 0 ? 1.18 : 0.82;
+      const rect = event.currentTarget.getBoundingClientRect();
+      const mouseX = ((event.clientX - rect.left) / Math.max(rect.width, 1)) * 900;
+      const ratio = Math.max(0, Math.min(1, (mouseX - chartX0) / chartW));
+      const oldSize = viewportSize;
+      const newSize = Math.max(20, Math.min(600, Math.round(oldSize * factor)));
+      if (newSize === oldSize) return;
+      const anchorIndex = visibleStartIndex + ratio * Math.max(oldSize - 1, 1);
+      let newStart = Math.round(anchorIndex - ratio * Math.max(newSize - 1, 1));
+      newStart = Math.max(0, Math.min(storedCandles.length - newSize, newStart));
+      const newEnd = Math.min(storedCandles.length, newStart + newSize);
+      setDisplayCandleCount(newSize);
+      setZoomEndIndex(newEnd);
+      try { localStorage.setItem("goldscope.technical.candleCount", String(newSize)); } catch {}
+    };
+
+    const beginPan = (event) => {
+      if (!storedCandles.length) return;
+      setIsPanning(true);
+      setPanStart({ x: event.clientX, end: visibleEndIndex, size: viewportSize });
+    };
+
+    const movePan = (event) => {
+      if (!isPanning || !panStart || !storedCandles.length) return;
+      const dx = event.clientX - panStart.x;
+      const candlesPerPx = panStart.size / Math.max(chartW, 1);
+      const deltaBars = Math.round(-dx * candlesPerPx);
+      const nextEnd = Math.max(panStart.size, Math.min(storedCandles.length, panStart.end + deltaBars));
+      setZoomEndIndex(nextEnd);
+    };
+
+    const endPan = () => {
+      setIsPanning(false);
+      setPanStart(null);
+    };
+
+    const resetChartZoom = () => {
+      const n = Math.max(20, Math.min(600, Number(displayCandleCount) || 240));
+      setZoomEndIndex(storedCandles.length);
+      setDisplayCandleCount(n);
+    };
+
+    const makePath = (series, yScale) => {
+      let path = "";
+      series.forEach((v, i) => {
+        if (!Number.isFinite(v)) return;
+        const cmd = path ? "L" : "M";
+        path += `${cmd}${xForIndex(i)},${yScale(v)} `;
+      });
+      return path.trim();
+    };
+    const ySmall = (v, top, height, minV, maxV) => {
+      const spanV = Math.max(maxV - minV, 1e-9);
+      return top + height - ((v - minV) / spanV) * height;
+    };
+
+    const chartGridStyle = chartMaximized
+      ? { display: "grid", gridTemplateColumns: "minmax(1060px, 1fr) 380px", gap: 16, alignItems: "stretch", minWidth: 1440 }
+      : { display: "grid", gridTemplateColumns: "minmax(920px, 1fr) 340px", gap: 16, alignItems: "stretch", minWidth: 1280 };
+
+    const chartSvgStyle = chartMaximized
+      ? { width: "100%", height: "calc(100vh - 170px)", minHeight: 780, maxHeight: 1100, background: C.card2, border: `1px solid ${C.border}`, borderRadius: 14 }
+      : { width: "100%", height: 820, minHeight: 760, background: C.card2, border: `1px solid ${C.border}`, borderRadius: 14 };
+
+    const legendStyle = chartMaximized
+      ? { background: C.card2, border: `1px solid ${C.border}`, borderRadius: 14, padding: 12, maxHeight: "calc(100vh - 170px)", overflowY: "auto" }
+      : { background: C.card2, border: `1px solid ${C.border}`, borderRadius: 14, padding: 12, maxHeight: 820, overflowY: "auto" };
+
+    const focusedSvgStyle = chartSvgStyle;
+
+    const Stat = ({ title, value, detail, color = C.gold }) => (
+      <div style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 12, padding: "12px 14px" }}>
+        <div style={{ color: C.muted, fontSize: 11, fontWeight: 850, marginBottom: 6 }}>{title}</div>
+        <div style={{ color, fontSize: 20, fontWeight: 950 }}>{fmt(value)}</div>
+        <div style={{ color: C.muted, fontSize: 11, marginTop: 3 }}>{detail || ""}</div>
+      </div>
+    );
+
+    const ModuleLine = ({ name, row }) => {
+      const score = Number(row?.score);
+      const color = Number.isFinite(score) ? (score < 0 ? C.red : score > 0 ? C.green : C.gray) : C.gray;
+      return (
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, borderBottom: `1px solid ${C.border}`, padding: "8px 0" }}>
+          <span>{name}</span>
+          <b style={{ color }}>{row?.bias || "n/a"} {Number.isFinite(score) ? `(${score})` : ""}</b>
+        </div>
+      );
+    };
+
+    const strategy = tech?.strategyModules || tf?.strategyModules || {};
+    const modules = strategy?.modules || {};
+    const mtf = tech?.multiTimeframe || {};
+    const requiredPhrase = get(tech, "technicalLanguageHints.requiredPhrase", get(tf, "technicalLanguageHints.requiredPhrase", "RSI/StochRSI wording unavailable."));
+
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <Card>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <Title icon="📊" title="Technical Dashboard Panel" sub="Safe UI panel reading the latest saved snapshot from localStorage." />
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Badge value={status === "available" ? "supportive" : "warning"}>{status}</Badge>
+              <Badge value={biasBadge}>{bias}</Badge>
+              <Badge value="blue">{source}</Badge>
+              <button style={btn(false)} onClick={refreshSnapshot}>Reload latest snapshot</button>
+            </div>
+          </div>
+          <p style={{ color: C.muted, lineHeight: 1.65 }}>
+            This panel is UI-only. It reads <code>goldscope.latestSnapshot.v1</code> and does not touch the report generator, validators, macro logic, employment logic, or decision gates.
+          </p>
+
+          {tech && (
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end", marginTop: 12 }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 5, color: C.muted, fontSize: 12, fontWeight: 850 }}>
+                Timeframe
+                <select value={tfKey} onChange={(e) => setTfSafe(e.target.value)} style={{ background: C.card2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 10, padding: "8px 10px", minWidth: 125 }}>
+                  {["1h", "4h", "1d", ...availableTfs.filter((x) => !["1h", "4h", "1d"].includes(x))].filter((x, i, arr) => x && arr.indexOf(x) === i).map((key) => (
+                    <option key={key} value={key} disabled={!timeframes[key]}>{key}{timeframes[key]?.candles?.length ? ` · ${timeframes[key].candles.length} bars` : timeframes[key] ? "" : " · unavailable"}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label style={{ display: "flex", flexDirection: "column", gap: 5, color: C.muted, fontSize: 12, fontWeight: 850 }}>
+                Candles displayed
+                <select value={String(displayCandleCount)} onChange={(e) => setCandleCountSafe(e.target.value)} style={{ background: C.card2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 10, padding: "8px 10px", minWidth: 150 }}>
+                  {[80, 160, 240, 365, 500, 600].map((n) => <option key={n} value={n}>{n} candles</option>)}
+                </select>
+              </label>
+
+              <div style={{ color: C.muted, fontSize: 12, lineHeight: 1.5 }}>
+                Stored candles: <b style={{ color: C.text }}>{storedCandles.length || "n/a"}</b><br />
+                Visible range: <b style={{ color: C.text }}>{storedCandles.length ? `${visibleStartIndex + 1}–${visibleEndIndex}` : "n/a"}</b>
+              </div>
+            </div>
+          )}
+          {error && <p style={{ color: C.red }}>Panel error: {error}</p>}
+          {!snapshot && (
+            <Card style={{ background: C.card2 }}>
+              <b>No saved snapshot found.</b>
+              <p style={{ color: C.muted, lineHeight: 1.6 }}>
+                Run AI Analysis once, or generate a GoldScope snapshot, then come back here and click Reload latest snapshot.
+              </p>
+            </Card>
+          )}
+          {snapshot && !tech && (
+            <Card style={{ background: C.card2 }}>
+              <b>Snapshot found, but no technicalContext exists in it.</b>
+              <p style={{ color: C.muted }}>Load technical context from the AI Analysis workflow first.</p>
+            </Card>
+          )}
+        </Card>
+
+        {tech && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+              <Stat title="Quality score" value={get(tech, "dataQuality.qualityScore", tech?.qualityScore)} detail="Snapshot data quality" color={C.blue} />
+              <Stat title="Technical confidence" value={tech?.technicalConfidence} detail="Confirmation confidence" color={C.gold} />
+              <Stat title="RSI14" value={tf?.rsi14} detail={Number(tf?.rsi14) < 30 ? "Classic oversold" : "No classic extreme"} color={Number(tf?.rsi14) < 30 ? C.red : C.blue} />
+              <Stat title="StochRSI K/D" value={`${fmt(get(tf, "stochRsi14.k"))} / ${fmt(get(tf, "stochRsi14.d"))}`} detail={get(tf, "stochRsi14.state", "state unknown")} color={Number(get(tf, "stochRsi14.k")) < 20 ? C.gold : C.blue} />
+              <Stat title="MACD hist" value={get(tf, "macd.histogram")} detail={get(tf, "macd.state", "state unknown")} color={Number(get(tf, "macd.histogram")) < 0 ? C.red : C.green} />
+              <Stat title="ADX14" value={get(tf, "adx14.adx")} detail={`${get(tf, "adx14.trendStrength", "unknown")} · ${get(tf, "adx14.direction", "unknown")}`} color={C.red} />
+            </div>
+
+            <Card>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                <Title icon="📈" title="Technical chart + indicator panels" sub="Candles, overlays, volume, RSI, MACD and ADX from real snapshot OHLC only." />
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                  <button onClick={resetChartZoom} style={btn(false)}>Reset zoom</button>
+                  <button onClick={() => setChartMaximized(true)} style={btn(false)}>⛶ Maximize chart</button>
+                </div>              </div>
+              {(levelRows.length || candles.length) ? (
+                <div style={{ overflowX: "auto", paddingBottom: 4 }}>
+                  <div style={chartGridStyle}>
+                    <svg
+                      viewBox="0 0 900 620"
+                      style={{ ...focusedSvgStyle, cursor: "crosshair" }}
+                      onMouseMove={(e) => {
+                        if (!candles.length) return;
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const x = ((e.clientX - rect.left) / rect.width) * 900;
+                        const idx = Math.round((x - chartX0) / (chartW / Math.max(candles.length - 1, 1)));
+                        setHoverIndex(Math.max(0, Math.min(candles.length - 1, idx)));
+                      }}
+                      onMouseLeave={() => setHoverIndex(null)}
+                    >
+                      <rect x="58" y="24" width={panelW} height="220" fill="#0b1220" rx="10" />
+                      <rect x="58" y="260" width={panelW} height="58" fill="#0b1220" rx="10" opacity="0.95" />
+                      <rect x="58" y="335" width={panelW} height="70" fill="#0b1220" rx="10" opacity="0.95" />
+                      <rect x="58" y="425" width={panelW} height="75" fill="#0b1220" rx="10" opacity="0.95" />
+                      <rect x="58" y="520" width={panelW} height="70" fill="#0b1220" rx="10" opacity="0.95" />
+
+                      {[0, 0.25, 0.5, 0.75, 1].map((p) => {
+                        const y = 214 - p * 176;
+                        const v = min + p * span;
+                        return (
+                          <g key={`price-grid-${p}`}>
+                            <line x1="58" x2="803" y1={y} y2={y} stroke={C.border} strokeWidth="1" />
+                            <text x="14" y={y + 4} fill={C.muted} fontSize="11">{round2(v)}</text>
+                          </g>
+                        );
+                      })}
+
+                      {supportZones.map((z, i) => {
+                        const yHigh = yFor(z.high);
+                        const yLow = yFor(z.low);
+                        const y = Math.min(yHigh, yLow) - 3;
+                        const h = Math.max(8, Math.abs(yLow - yHigh) + 6);
+                        return <rect key={`support-zone-${i}`} x="74" y={y} width="709" height={h} fill={C.green} opacity="0.12" />;
+                      })}
+                      {resistanceZones.map((z, i) => {
+                        const yHigh = yFor(z.high);
+                        const yLow = yFor(z.low);
+                        const y = Math.min(yHigh, yLow) - 3;
+                        const h = Math.max(8, Math.abs(yLow - yHigh) + 6);
+                        return <rect key={`resistance-zone-${i}`} x="74" y={y} width="709" height={h} fill={C.red} opacity="0.12" />;
+                      })}
+
+                      {candles.length > 0 && candles.map((c, i) => {
+                        const step = candles.length > 1 ? chartW / Math.max(candles.length - 1, 1) : chartW;
+                        const x = xForIndex(i);
+                        const bodyW = Math.max(2, Math.min(8, step * 0.55));
+                        const yOpen = yFor(c.open);
+                        const yClose = yFor(c.close);
+                        const yHigh = yFor(c.high);
+                        const yLow = yFor(c.low);
+                        const up = c.close >= c.open;
+                        const color = up ? C.green : C.red;
+                        const bodyY = Math.min(yOpen, yClose);
+                        const bodyH = Math.max(1.5, Math.abs(yClose - yOpen));
+                        return (
+                          <g key={`candle-${i}`}>
+                            <line x1={x} x2={x} y1={yHigh} y2={yLow} stroke={color} strokeWidth="1" opacity="0.85" />
+                            <rect x={x - bodyW / 2} y={bodyY} width={bodyW} height={bodyH} fill={up ? "rgba(34,197,94,0.72)" : "rgba(255,82,82,0.72)"} stroke={color} strokeWidth="0.8" rx="1" />
+                          </g>
+                        );
+                      })}
+
+                      <path d={makePath(ema20Series, yFor)} fill="none" stroke={C.gold} strokeWidth="1.4" opacity="0.9" />
+                      <path d={makePath(ema50Series, yFor)} fill="none" stroke={C.blue} strokeWidth="1.2" opacity="0.85" />
+                      <path d={makePath(ema200Series, yFor)} fill="none" stroke={C.purple} strokeWidth="1.2" opacity="0.85" />
+
+                      {levelRows.map((row, i) => {
+                        const y = yFor(row.value);
+                        const isPrice = /price/i.test(row.label);
+                        const isSupport = /support/i.test(row.label);
+                        const isResistance = /resistance/i.test(row.label);
+                        const isBand = /BB|KC/i.test(row.label);
+                        const color = isSupport ? C.green : isResistance ? C.red : isPrice ? C.text : /EMA/.test(row.label) ? C.gold : C.blue;
+                        return (
+                          <g key={`${row.label}-${i}`}>
+                            <line x1="74" x2="783" y1={y} y2={y} stroke={color} strokeWidth={isPrice ? 2.2 : 1.0} opacity={isPrice ? 0.78 : 0.32} strokeDasharray={isBand ? "5 5" : ""} />
+                            <circle cx="783" cy={y} r={isPrice ? 3.0 : 2.0} fill={color} opacity={0.70} />
+                          </g>
+                        );
+                      })}
+
+                      {volumeValid && volumeValues.map((v, i) => {
+                        const x = xForIndex(i);
+                        const barH = Math.max(1, Math.sqrt(v / maxVolume) * 50);
+                        const c = candles[i];
+                        const up = c?.close >= c?.open;
+                        return <rect key={`vol-${i}`} x={x - 2} y={314 - barH} width="4" height={barH} fill={up ? C.green : C.red} opacity="0.55" />;
+                      })}
+                      <text x="66" y="274" fill={volumeValid ? C.muted : C.gold} fontSize="11">{volumePanelNote}</text>
+
+                      {[30, 50, 70].map((v) => {
+                        const y = ySmall(v, 342, 54, 0, 100);
+                        return (
+                          <g key={`rsi-grid-${v}`}>
+                            <line x1="66" x2="790" y1={y} y2={y} stroke={v === 50 ? C.border : C.gold} strokeWidth="1" opacity={v === 50 ? 0.55 : 0.35} strokeDasharray={v === 50 ? "" : "4 4"} />
+                            <text x="28" y={y + 4} fill={C.muted} fontSize="10">{v}</text>
+                          </g>
+                        );
+                      })}
+                      <path d={makePath(rsiSeries, (v) => ySmall(v, 342, 54, 0, 100))} fill="none" stroke={C.blue} strokeWidth="1.5" />
+                      {Number.isFinite(currentRsi) && (
+                        <>
+                          <circle cx="792" cy={ySmall(currentRsi, 342, 54, 0, 100)} r="3" fill={C.blue} />
+                          <text x="812" y={ySmall(currentRsi, 342, 54, 0, 100) + 4} fill={C.blue} fontSize="11">RSI {round2(currentRsi)}</text>
+                        </>
+                      )}
+                      <text x="66" y="351" fill={C.muted} fontSize="11">RSI14</text>
+
+                      {(() => {
+                        const vals = macdSeries.hist.filter(Number.isFinite);
+                        const maxAbs = Math.max(...vals.map((v) => Math.abs(v)), 1);
+                        return macdSeries.hist.map((v, i) => {
+                          if (!Number.isFinite(v)) return null;
+                          const x = xForIndex(i);
+                          const y0 = ySmall(0, 438, 48, -maxAbs, maxAbs);
+                          const y = ySmall(v, 438, 48, -maxAbs, maxAbs);
+                          return <rect key={`macd-h-${i}`} x={x - 2} y={Math.min(y, y0)} width="4" height={Math.max(1, Math.abs(y - y0))} fill={v >= 0 ? C.green : C.red} opacity="0.62" />;
+                        });
+                      })()}
+                      {(() => {
+                        const vals = [...macdSeries.macd, ...macdSeries.signal].filter(Number.isFinite);
+                        const minM = vals.length ? Math.min(...vals) : -1;
+                        const maxM = vals.length ? Math.max(...vals) : 1;
+                        return (
+                          <>
+                            <path d={makePath(macdSeries.macd, (v) => ySmall(v, 438, 48, minM, maxM))} fill="none" stroke={C.blue} strokeWidth="1.2" />
+                            <path d={makePath(macdSeries.signal, (v) => ySmall(v, 438, 48, minM, maxM))} fill="none" stroke={C.gold} strokeWidth="1.1" />
+                          </>
+                        );
+                      })()}
+                      <text x="66" y="438" fill={C.muted} fontSize="11">MACD</text>
+
+                      <path d={makePath(adxSeries.adx, (v) => ySmall(v, 532, 46, 0, 70))} fill="none" stroke={C.gold} strokeWidth="1.3" />
+                      <path d={makePath(adxSeries.plusDi, (v) => ySmall(v, 532, 46, 0, 70))} fill="none" stroke={C.green} strokeWidth="1.1" opacity="0.9" />
+                      <path d={makePath(adxSeries.minusDi, (v) => ySmall(v, 532, 46, 0, 70))} fill="none" stroke={C.red} strokeWidth="1.1" opacity="0.9" />
+                      <text x="66" y="532" fill={C.muted} fontSize="11">ADX / +DI / -DI</text>
+
+                      {selectedCandle && (
+                        <g>
+                          <rect x="805" y="42" width="86" height="202" rx="10" fill="#020617" stroke={C.border} opacity="0.84" />
+                          <text x="812" y="60" fill={C.text} fontSize="10" fontWeight="800">Selected</text>
+                          <text x="812" y="76" fill={C.gold} fontSize="9">{Number.isInteger(hoverIndex) && candles[hoverIndex] ? "Hover" : "Last"}</text>
+                          <text x="812" y="96" fill={C.muted} fontSize="9">O</text>
+                          <text x="842" y="96" fill={C.text} fontSize="9">{fmt(selectedCandle.open)}</text>
+
+                          <text x="812" y="112" fill={C.green} fontSize="9">H</text>
+                          <text x="842" y="112" fill={C.green} fontSize="9">{fmt(selectedCandle.high)}</text>
+                          <text x="812" y="128" fill={C.red} fontSize="9">L</text>
+                          <text x="842" y="128" fill={C.red} fontSize="9">{fmt(selectedCandle.low)}</text>
+                          <text x="812" y="144" fill={C.text} fontSize="9">C</text>
+                          <text x="842" y="144" fill={C.text} fontSize="9">{fmt(selectedCandle.close)}</text>
+
+                          <text x="812" y="166" fill={C.blue} fontSize="9">RSI</text>
+                          <text x="842" y="166" fill={C.blue} fontSize="9">{fmt(selectedRsi)}</text>
+                          <text x="812" y="182" fill={C.blue} fontSize="9">MACD</text>
+                          <text x="842" y="182" fill={C.blue} fontSize="9">{fmt(selectedMacd)}</text>
+                          <text x="812" y="198" fill={Number(selectedHist) < 0 ? C.red : C.green} fontSize="9">Hist</text>
+                          <text x="842" y="198" fill={Number(selectedHist) < 0 ? C.red : C.green} fontSize="9">{fmt(selectedHist)}</text>
+                          <text x="812" y="214" fill={C.gold} fontSize="9">ADX</text>
+                          <text x="842" y="214" fill={C.gold} fontSize="9">{fmt(selectedAdx)}</text>
+                          <text x="812" y="230" fill={C.red} fontSize="9">-DI</text>
+                          <text x="842" y="230" fill={C.red} fontSize="9">{fmt(selectedMinusDi)}</text>
+                        </g>
+                      )}
+
+                      <text x="74" y="612" fill={C.muted} fontSize="12">
+                        {candles.length > 0 ? `Candles: showing ${visibleStartIndex + 1}–${visibleEndIndex} of ${storedCandles.length}. Side legend always shows selected candle; hover updates values. Use Maximize for wheel zoom and drag pan.` : "No OHLC candles found in snapshot. Add real candles to technicalContext to draw this chart without TradingView."}
+                      </text>
+                    </svg>
+
+                    <div style={legendStyle}>
+                      <div style={{ fontWeight: 950, marginBottom: 8, color: C.text }}>Chart legend</div>
+                      <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: 10, marginBottom: 12, background: "#07111f" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 8 }}>
+                          <div style={{ color: C.text, fontSize: 13, fontWeight: 950 }}>Selected candle details</div>
+                          <div style={{ color: C.gold, fontSize: 11, fontWeight: 850 }}>
+                            {selectedCandle ? `${Number.isInteger(hoverIndex) && candles[hoverIndex] ? "Hover" : "Last"} · ${String(selectedCandle.time).slice(0, 19)}` : "No candle"}
+                          </div>
+                        </div>
+                        {selectedCandle ? (
+                          <div>
+                            {[
+                              ["Open", selectedCandle.open, C.text],
+                              ["High", selectedCandle.high, C.green],
+                              ["Low", selectedCandle.low, C.red],
+                              ["Close", selectedCandle.close, C.text],
+                              ["Volume", selectedVolume, volumeValid ? C.text : C.gold],
+                              ["RSI", selectedRsi, C.blue],
+                              ["MACD", selectedMacd, C.blue],
+                              ["Signal", selectedSignal, C.gold],
+                              ["Hist", selectedHist, Number(selectedHist) < 0 ? C.red : C.green],
+                              ["ADX", selectedAdx, C.gold],
+                              ["+DI", selectedPlusDi, C.green],
+                              ["-DI", selectedMinusDi, C.red],
+                            ].map(([label, value, color]) => (
+                              <div key={`top-selected-${label}`} style={{ display: "flex", justifyContent: "space-between", gap: 12, borderBottom: `1px solid ${C.border}`, padding: "4px 0" }}>
+                                <span style={{ color, fontSize: 12, fontWeight: 850 }}>{label}</span>
+                                <span style={{ color: C.muted, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{label === "Volume" && value !== null && volumeValid ? Math.round(value).toLocaleString() : fmt(value)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div style={{ color: C.muted, fontSize: 12 }}>No candle data available in the current snapshot.</div>
+                        )}
+                      </div>
+                      <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 8, marginBottom: 10 }}>
+                        <div style={{ color: C.muted, fontSize: 11 }}>Interaction mode</div>
+                        <b style={{ color: C.gold }}>Normal: hover only · Maximize: zoom/pan</b>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+                        <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 8 }}>
+                          <div style={{ color: C.muted, fontSize: 11 }}>Candles</div>
+                          <b style={{ color: candles.length ? C.green : C.gold }}>{candles.length ? `${candles.length}/${storedCandles.length} bars` : "missing"}</b>
+                        </div>
+                        <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 8 }}>
+                          <div style={{ color: C.muted, fontSize: 11 }}>Overlays</div>
+                          <b style={{ color: C.blue }}>EMA + zones + indicators</b>
+                        </div>
+                      </div>
+
+                      {selectedCandle && (
+                        <div style={{ marginBottom: 12 }}>
+                          <div style={{ color: C.muted, fontSize: 11, fontWeight: 950, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>Selected candle details</div>
+                          <div style={{ color: C.gold, fontSize: 12, fontWeight: 900, marginBottom: 4 }}>{`${Number.isInteger(hoverIndex) && candles[hoverIndex] ? 'Hover' : 'Last'} · ${String(selectedCandle.time).slice(0, 19)}`}</div>
+                          {[
+                            ["Open", selectedCandle.open, C.text],
+                            ["High", selectedCandle.high, C.green],
+                            ["Low", selectedCandle.low, C.red],
+                            ["Close", selectedCandle.close, C.text],
+                            ["Volume", selectedVolume, volumeValid ? C.text : C.gold],
+                            ["RSI", selectedRsi, C.blue],
+                            ["MACD", selectedMacd, C.blue],
+                            ["Signal", selectedSignal, C.gold],
+                            ["Hist", selectedHist, Number(selectedHist) < 0 ? C.red : C.green],
+                            ["ADX", selectedAdx, C.gold],
+                            ["+DI", selectedPlusDi, C.green],
+                            ["-DI", selectedMinusDi, C.red],
+                          ].map(([label, value, color]) => (
+                            <div key={`normal-hover-${label}`} style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px solid ${C.border}`, padding: "4px 0" }}>
+                              <span style={{ color, fontSize: 12, fontWeight: 800 }}>{label}</span>
+                              <span style={{ color: C.muted, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{label === "Volume" && value !== null && volumeValid ? Math.round(value).toLocaleString() : fmt(value)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div style={{ marginBottom: 12 }}>
+                        <div style={{ color: C.muted, fontSize: 11, fontWeight: 950, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>Indicator overlays</div>
+                        {[
+                          ["EMA20", tf.ema20, C.gold],
+                          ["EMA50", tf.ema50, C.blue],
+                          ["EMA200", tf.ema200, C.purple],
+                          ["RSI14 current", currentRsi, C.blue],
+                          ["MACD current", currentMacd, C.blue],
+                          ["Signal current", currentSignal, C.gold],
+                          ["Hist current", currentHist, Number(currentHist) < 0 ? C.red : C.green],
+                          ["ADX current", currentAdx, C.gold],
+                          ["+DI current", currentPlusDi, C.green],
+                          ["-DI current", currentMinusDi, C.red],
+                        ].map(([label, value, color]) => (
+                          <div key={label} style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px solid ${C.border}`, padding: "4px 0" }}>
+                            <span style={{ color, fontSize: 12, fontWeight: 800 }}>{label}</span>
+                            <span style={{ color: C.muted, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{fmt(value)}</span>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div style={{ marginBottom: 12 }}>
+                        <div style={{ color: C.muted, fontSize: 11, fontWeight: 950, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>Clustered zones</div>
+                        {[
+                          ["Resistance", resistanceZones, C.red],
+                          ["Support", supportZones, C.green],
+                        ].map(([group, zones, color]) => zones.length ? (
+                          <div key={group} style={{ marginBottom: 8 }}>
+                            <div style={{ color, fontSize: 12, fontWeight: 900, marginBottom: 3 }}>{group}</div>
+                            {zones.map((z, i) => (
+                              <div key={`${group}-${i}`} style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px solid ${C.border}`, padding: "4px 0" }}>
+                                <span style={{ color: C.muted, fontSize: 12 }}>{z.count > 1 ? `${z.label} (${z.count} levels)` : z.label}</span>
+                                <span style={{ color: C.muted, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{z.low === z.high ? round2(z.mid) : `${round2(z.low)}–${round2(z.high)}`}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null)}
+                      </div>
+
+                      {[
+                        ["Price", levelRows.filter((x) => /price/i.test(x.label))],
+                        ["EMA", levelRows.filter((x) => /EMA/i.test(x.label))],
+                        ["Bands", levelRows.filter((x) => /BB|KC/i.test(x.label))],
+                        ["Resistance zones", levelRows.filter((x) => /resistance/i.test(x.label))],
+                        ["Support zones", levelRows.filter((x) => /support/i.test(x.label))],
+                      ].map(([group, rows]) => rows.length ? (
+                        <div key={group} style={{ marginBottom: 10 }}>
+                          <div style={{ color: C.muted, fontSize: 11, fontWeight: 950, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>{group}</div>
+                          {rows.map((row, i) => {
+                            const color = /support/i.test(row.label) ? C.green : /resistance/i.test(row.label) ? C.red : /price/i.test(row.label) ? C.text : /EMA/.test(row.label) ? C.gold : C.blue;
+                            return (
+                              <div key={`${group}-${row.label}-${i}`} style={{ display: "flex", justifyContent: "space-between", gap: 10, borderBottom: `1px solid ${C.border}`, padding: "4px 0" }}>
+                                <span style={{ color, fontSize: 12, fontWeight: 800 }}>{row.label}</span>
+                                <span style={{ color: C.muted, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{round2(row.value)}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : null)}
+                    </div>
+                  </div>
+                </div>
+              ) : <p style={{ color: C.muted }}>No numeric technical levels or OHLC candles are available in the current snapshot.</p>}
+            </Card>
+
+            {chartMaximized && (
+              <div
+                role="dialog"
+                aria-modal="true"
+                style={{
+                  position: "fixed",
+                  inset: 0,
+                  zIndex: 9999,
+                  background: "rgba(2,6,23,0.96)",
+                  padding: 18,
+                  overflow: "auto",
+                  backdropFilter: "blur(8px)",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 12 }}>
+                  <div>
+                    <div style={{ color: C.text, fontSize: 20, fontWeight: 950 }}>Technical chart fullscreen</div>
+                    <div style={{ color: C.muted, fontSize: 12 }}>Timeframe {tfKey}; visible {visibleStartIndex + 1}–{visibleEndIndex} of {storedCandles.length}; side legend always shows selected candle; wheel zoom and drag pan are enabled.</div>
+                  </div>
+                  <button onClick={resetChartZoom} style={btn(false)}>Reset zoom</button>
+                  <button onClick={() => setChartMaximized(false)} style={btn(false)}>✕ Close</button>
+                </div>
+
+                <Card style={{ margin: 0 }}>
+                  <div style={{ overflowX: "auto", paddingBottom: 4 }}>
+                    <div style={chartGridStyle}>
+                      <svg
+                        viewBox="0 0 900 620"
+                        style={{ ...chartSvgStyle, cursor: isPanning ? "grabbing" : "grab" }}
+                        onWheel={applyWheelZoom}
+                        onMouseDown={beginPan}
+                        onMouseUp={endPan}
+                        onMouseMove={(e) => {
+                          movePan(e);
+                          if (!candles.length) return;
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const x = ((e.clientX - rect.left) / rect.width) * 900;
+                          const idx = Math.round((x - chartX0) / (chartW / Math.max(candles.length - 1, 1)));
+                          setHoverIndex(Math.max(0, Math.min(candles.length - 1, idx)));
+                        }}
+                        onMouseLeave={() => { setHoverIndex(null); endPan(); }}
+                      >
+                        <rect x="58" y="24" width={panelW} height="220" fill="#0b1220" rx="10" />
+                        <rect x="58" y="260" width={panelW} height="58" fill="#0b1220" rx="10" opacity="0.95" />
+                        <rect x="58" y="335" width={panelW} height="70" fill="#0b1220" rx="10" opacity="0.95" />
+                        <rect x="58" y="425" width={panelW} height="75" fill="#0b1220" rx="10" opacity="0.95" />
+                        <rect x="58" y="520" width={panelW} height="70" fill="#0b1220" rx="10" opacity="0.95" />
+
+                        {[0, 0.25, 0.5, 0.75, 1].map((p) => {
+                          const y = 214 - p * 176;
+                          const v = min + p * span;
+                          return (
+                            <g key={`fs-price-grid-${p}`}>
+                              <line x1="58" x2="803" y1={y} y2={y} stroke={C.border} strokeWidth="1" />
+                              <text x="14" y={y + 4} fill={C.muted} fontSize="11">{round2(v)}</text>
+                            </g>
+                          );
+                        })}
+
+                        {supportZones.map((z, i) => {
+                          const yHigh = yFor(z.high);
+                          const yLow = yFor(z.low);
+                          const y = Math.min(yHigh, yLow) - 3;
+                          const h = Math.max(8, Math.abs(yLow - yHigh) + 6);
+                          return <rect key={`fs-support-zone-${i}`} x="74" y={y} width="709" height={h} fill={C.green} opacity="0.12" />;
+                        })}
+                        {resistanceZones.map((z, i) => {
+                          const yHigh = yFor(z.high);
+                          const yLow = yFor(z.low);
+                          const y = Math.min(yHigh, yLow) - 3;
+                          const h = Math.max(8, Math.abs(yLow - yHigh) + 6);
+                          return <rect key={`fs-resistance-zone-${i}`} x="74" y={y} width="709" height={h} fill={C.red} opacity="0.12" />;
+                        })}
+
+                        {candles.length > 0 && candles.map((c, i) => {
+                          const step = candles.length > 1 ? chartW / Math.max(candles.length - 1, 1) : chartW;
+                          const x = xForIndex(i);
+                          const bodyW = Math.max(2, Math.min(8, step * 0.55));
+                          const yOpen = yFor(c.open);
+                          const yClose = yFor(c.close);
+                          const yHigh = yFor(c.high);
+                          const yLow = yFor(c.low);
+                          const up = c.close >= c.open;
+                          const color = up ? C.green : C.red;
+                          const bodyY = Math.min(yOpen, yClose);
+                          const bodyH = Math.max(1.5, Math.abs(yClose - yOpen));
+                          return (
+                            <g key={`fs-candle-${i}`}>
+                              <line x1={x} x2={x} y1={yHigh} y2={yLow} stroke={color} strokeWidth="1" opacity="0.85" />
+                              <rect x={x - bodyW / 2} y={bodyY} width={bodyW} height={bodyH} fill={up ? "rgba(34,197,94,0.72)" : "rgba(255,82,82,0.72)"} stroke={color} strokeWidth="0.8" rx="1" />
+                            </g>
+                          );
+                        })}
+
+                        <path d={makePath(ema20Series, yFor)} fill="none" stroke={C.gold} strokeWidth="1.4" opacity="0.9" />
+                        <path d={makePath(ema50Series, yFor)} fill="none" stroke={C.blue} strokeWidth="1.2" opacity="0.85" />
+                        <path d={makePath(ema200Series, yFor)} fill="none" stroke={C.purple} strokeWidth="1.2" opacity="0.85" />
+
+                        {volumeValid && volumeValues.map((v, i) => {
+                          const x = xForIndex(i);
+                          const barH = Math.max(1, Math.sqrt(v / maxVolume) * 50);
+                          const c = candles[i];
+                          const up = c?.close >= c?.open;
+                          return <rect key={`fs-vol-${i}`} x={x - 2} y={314 - barH} width="4" height={barH} fill={up ? C.green : C.red} opacity="0.55" />;
+                        })}
+                        <text x="66" y="274" fill={volumeValid ? C.muted : C.gold} fontSize="11">{volumePanelNote}</text>
+
+                        {[30, 50, 70].map((v) => {
+                          const y = ySmall(v, 342, 54, 0, 100);
+                          return (
+                            <g key={`fs-rsi-grid-${v}`}>
+                              <line x1="66" x2="790" y1={y} y2={y} stroke={v === 50 ? C.border : C.gold} strokeWidth="1" opacity={v === 50 ? 0.55 : 0.35} strokeDasharray={v === 50 ? "" : "4 4"} />
+                              <text x="28" y={y + 4} fill={C.muted} fontSize="10">{v}</text>
+                            </g>
+                          );
+                        })}
+                        <path d={makePath(rsiSeries, (v) => ySmall(v, 342, 54, 0, 100))} fill="none" stroke={C.blue} strokeWidth="1.5" />
+                        {Number.isFinite(currentRsi) && (
+                          <>
+                            <circle cx="792" cy={ySmall(currentRsi, 342, 54, 0, 100)} r="3" fill={C.blue} />
+                            <text x="812" y={ySmall(currentRsi, 342, 54, 0, 100) + 4} fill={C.blue} fontSize="11">RSI {round2(currentRsi)}</text>
+                          </>
+                        )}
+                        <text x="66" y="351" fill={C.muted} fontSize="11">RSI14</text>
+
+                        {(() => {
+                          const vals = macdSeries.hist.filter(Number.isFinite);
+                          const maxAbs = Math.max(...vals.map((v) => Math.abs(v)), 1);
+                          return macdSeries.hist.map((v, i) => {
+                            if (!Number.isFinite(v)) return null;
+                            const x = xForIndex(i);
+                            const y0 = ySmall(0, 438, 48, -maxAbs, maxAbs);
+                            const y = ySmall(v, 438, 48, -maxAbs, maxAbs);
+                            return <rect key={`fs-macd-h-${i}`} x={x - 2} y={Math.min(y, y0)} width="4" height={Math.max(1, Math.abs(y - y0))} fill={v >= 0 ? C.green : C.red} opacity="0.62" />;
+                          });
+                        })()}
+                        {(() => {
+                          const vals = [...macdSeries.macd, ...macdSeries.signal].filter(Number.isFinite);
+                          const minM = vals.length ? Math.min(...vals) : -1;
+                          const maxM = vals.length ? Math.max(...vals) : 1;
+                          return (
+                            <>
+                              <path d={makePath(macdSeries.macd, (v) => ySmall(v, 438, 48, minM, maxM))} fill="none" stroke={C.blue} strokeWidth="1.2" />
+                              <path d={makePath(macdSeries.signal, (v) => ySmall(v, 438, 48, minM, maxM))} fill="none" stroke={C.gold} strokeWidth="1.1" />
+                            </>
+                          );
+                        })()}
+                        <text x="66" y="438" fill={C.muted} fontSize="11">MACD</text>
+
+                        <path d={makePath(adxSeries.adx, (v) => ySmall(v, 532, 46, 0, 70))} fill="none" stroke={C.gold} strokeWidth="1.3" />
+                        <path d={makePath(adxSeries.plusDi, (v) => ySmall(v, 532, 46, 0, 70))} fill="none" stroke={C.green} strokeWidth="1.1" opacity="0.9" />
+                        <path d={makePath(adxSeries.minusDi, (v) => ySmall(v, 532, 46, 0, 70))} fill="none" stroke={C.red} strokeWidth="1.1" opacity="0.9" />
+                        <text x="66" y="532" fill={C.muted} fontSize="11">ADX / +DI / -DI</text>
+
+                        {selectedCandle && (
+                          <g>
+                            <rect x="805" y="42" width="86" height="202" rx="10" fill="#020617" stroke={C.border} opacity="0.84" />
+                            <text x="812" y="60" fill={C.text} fontSize="10" fontWeight="800">Selected</text>
+                            <text x="812" y="76" fill={C.gold} fontSize="9">{Number.isInteger(hoverIndex) && candles[hoverIndex] ? "Hover" : "Last"}</text>
+                              <text x="812" y="96" fill={C.muted} fontSize="9">O</text>
+                            <text x="842" y="96" fill={C.text} fontSize="9">{fmt(selectedCandle.open)}</text>
+
+                            <text x="812" y="112" fill={C.green} fontSize="9">H</text>
+                            <text x="842" y="112" fill={C.green} fontSize="9">{fmt(selectedCandle.high)}</text>
+                            <text x="812" y="128" fill={C.red} fontSize="9">L</text>
+                            <text x="842" y="128" fill={C.red} fontSize="9">{fmt(selectedCandle.low)}</text>
+                            <text x="812" y="144" fill={C.text} fontSize="9">C</text>
+                            <text x="842" y="144" fill={C.text} fontSize="9">{fmt(selectedCandle.close)}</text>
+
+                            <text x="812" y="166" fill={C.blue} fontSize="9">RSI</text>
+                            <text x="842" y="166" fill={C.blue} fontSize="9">{fmt(selectedRsi)}</text>
+                            <text x="812" y="182" fill={C.blue} fontSize="9">MACD</text>
+                            <text x="842" y="182" fill={C.blue} fontSize="9">{fmt(selectedMacd)}</text>
+                            <text x="812" y="198" fill={Number(selectedHist) < 0 ? C.red : C.green} fontSize="9">Hist</text>
+                            <text x="842" y="198" fill={Number(selectedHist) < 0 ? C.red : C.green} fontSize="9">{fmt(selectedHist)}</text>
+                          <text x="812" y="214" fill={C.gold} fontSize="9">ADX</text>
+                          <text x="842" y="214" fill={C.gold} fontSize="9">{fmt(selectedAdx)}</text>
+                          <text x="812" y="230" fill={C.red} fontSize="9">-DI</text>
+                          <text x="842" y="230" fill={C.red} fontSize="9">{fmt(selectedMinusDi)}</text>
+                          </g>
+                        )}
+
+                        <text x="74" y="612" fill={C.muted} fontSize="12">
+                          {candles.length > 0 ? `Candles: showing ${visibleStartIndex + 1}–${visibleEndIndex} of ${storedCandles.length}. Wheel = zoom, drag = pan, hover = synced panel values.` : "No OHLC candles found in snapshot. Add real candles to technicalContext to draw this chart without TradingView."}
+                        </text>
+                      </svg>
+
+                      <div style={legendStyle}>
+                        <div style={{ fontWeight: 950, marginBottom: 8, color: C.text }}>Chart legend</div>
+                      <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: 10, marginBottom: 12, background: "#07111f" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 8 }}>
+                          <div style={{ color: C.text, fontSize: 13, fontWeight: 950 }}>Selected candle details</div>
+                          <div style={{ color: C.gold, fontSize: 11, fontWeight: 850 }}>
+                            {selectedCandle ? `${Number.isInteger(hoverIndex) && candles[hoverIndex] ? "Hover" : "Last"} · ${String(selectedCandle.time).slice(0, 19)}` : "No candle"}
+                          </div>
+                        </div>
+                        {selectedCandle ? (
+                          <div>
+                            {[
+                              ["Open", selectedCandle.open, C.text],
+                              ["High", selectedCandle.high, C.green],
+                              ["Low", selectedCandle.low, C.red],
+                              ["Close", selectedCandle.close, C.text],
+                              ["Volume", selectedVolume, volumeValid ? C.text : C.gold],
+                              ["RSI", selectedRsi, C.blue],
+                              ["MACD", selectedMacd, C.blue],
+                              ["Signal", selectedSignal, C.gold],
+                              ["Hist", selectedHist, Number(selectedHist) < 0 ? C.red : C.green],
+                              ["ADX", selectedAdx, C.gold],
+                              ["+DI", selectedPlusDi, C.green],
+                              ["-DI", selectedMinusDi, C.red],
+                            ].map(([label, value, color]) => (
+                              <div key={`top-selected-${label}`} style={{ display: "flex", justifyContent: "space-between", gap: 12, borderBottom: `1px solid ${C.border}`, padding: "4px 0" }}>
+                                <span style={{ color, fontSize: 12, fontWeight: 850 }}>{label}</span>
+                                <span style={{ color: C.muted, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{label === "Volume" && value !== null && volumeValid ? Math.round(value).toLocaleString() : fmt(value)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div style={{ color: C.muted, fontSize: 12 }}>No candle data available in the current snapshot.</div>
+                        )}
+                      </div>
+                        <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 8, marginBottom: 10 }}>
+                          <div style={{ color: C.muted, fontSize: 11 }}>Fullscreen selected candle</div>
+                          <b style={{ color: hoveredCandle ? C.gold : C.muted }}>{selectedCandle ? `${Number.isInteger(hoverIndex) && candles[hoverIndex] ? 'Hover' : 'Last'} · ${String(selectedCandle.time).slice(0, 19)}` : "No candle selected"}</b>
+                        </div>
+
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+                          <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 8 }}>
+                            <div style={{ color: C.muted, fontSize: 11 }}>Candles</div>
+                            <b style={{ color: candles.length ? C.green : C.gold }}>{candles.length ? `${candles.length}/${storedCandles.length} bars` : "missing"}</b>
+                          </div>
+                          <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 8 }}>
+                            <div style={{ color: C.muted, fontSize: 11 }}>Visible range</div>
+                            <b style={{ color: C.blue }}>{storedCandles.length ? `${visibleStartIndex + 1}–${visibleEndIndex}` : "n/a"}</b>
+                          </div>
+                        </div>
+
+                        <div style={{ marginBottom: 12 }}>
+                          <div style={{ color: C.muted, fontSize: 11, fontWeight: 950, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>Current indicators</div>
+                          {[
+                            ["EMA20", tf.ema20, C.gold],
+                            ["EMA50", tf.ema50, C.blue],
+                            ["EMA200", tf.ema200, C.purple],
+                            ["RSI14", currentRsi, C.blue],
+                            ["MACD", currentMacd, C.blue],
+                            ["Signal", currentSignal, C.gold],
+                            ["Hist", currentHist, Number(currentHist) < 0 ? C.red : C.green],
+                            ["ADX", currentAdx, C.gold],
+                            ["+DI", currentPlusDi, C.green],
+                            ["-DI", currentMinusDi, C.red],
+                          ].map(([label, value, color]) => (
+                            <div key={`fs-current-${label}`} style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px solid ${C.border}`, padding: "4px 0" }}>
+                              <span style={{ color, fontSize: 12, fontWeight: 800 }}>{label}</span>
+                              <span style={{ color: C.muted, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{fmt(value)}</span>
+                            </div>
+                          ))}
+                        </div>
+
+                        {selectedCandle && (
+                          <div style={{ marginBottom: 12 }}>
+                            <div style={{ color: C.muted, fontSize: 11, fontWeight: 950, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>Selected candle</div>
+                            {[
+                              ["Open", selectedCandle.open, C.text],
+                              ["High", selectedCandle.high, C.green],
+                              ["Low", selectedCandle.low, C.red],
+                              ["Close", selectedCandle.close, C.text],
+                              ["Volume", selectedVolume, volumeValid ? C.text : C.gold],
+                              ["RSI", selectedRsi, C.blue],
+                              ["MACD", selectedMacd, C.blue],
+                              ["Signal", selectedSignal, C.gold],
+                              ["Hist", selectedHist, Number(selectedHist) < 0 ? C.red : C.green],
+                              ["ADX", selectedAdx, C.gold],
+                              ["+DI", selectedPlusDi, C.green],
+                              ["-DI", selectedMinusDi, C.red],
+                            ].map(([label, value, color]) => (
+                              <div key={`fs-hover-${label}`} style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px solid ${C.border}`, padding: "4px 0" }}>
+                                <span style={{ color, fontSize: 12, fontWeight: 800 }}>{label}</span>
+                                <span style={{ color: C.muted, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{label === "Volume" && value !== null && volumeValid ? Math.round(value).toLocaleString() : fmt(value)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {selectedCandle && (
+                          <div style={{ marginBottom: 12 }}>
+                            <div style={{ color: C.muted, fontSize: 11, fontWeight: 950, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>Selected candle</div>
+                            <div style={{ color: C.gold, fontSize: 12, fontWeight: 900, marginBottom: 4 }}>{`${Number.isInteger(hoverIndex) && candles[hoverIndex] ? 'Hover' : 'Last'} · ${String(selectedCandle.time).slice(0, 19)}`}</div>
+                            {[
+                              ["Open", selectedCandle.open, C.text],
+                              ["High", selectedCandle.high, C.green],
+                              ["Low", selectedCandle.low, C.red],
+                              ["Close", selectedCandle.close, C.text],
+                              ["Volume", selectedVolume, volumeValid ? C.text : C.gold],
+                              ["RSI", selectedRsi, C.blue],
+                              ["MACD", selectedMacd, C.blue],
+                              ["Signal", selectedSignal, C.gold],
+                              ["Hist", selectedHist, Number(selectedHist) < 0 ? C.red : C.green],
+                              ["ADX", selectedAdx, C.gold],
+                              ["+DI", selectedPlusDi, C.green],
+                              ["-DI", selectedMinusDi, C.red],
+                            ].map(([label, value, color]) => (
+                              <div key={`fs-hover-${label}`} style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px solid ${C.border}`, padding: "4px 0" }}>
+                                <span style={{ color, fontSize: 12, fontWeight: 800 }}>{label}</span>
+                                <span style={{ color: C.muted, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{label === "Volume" && value !== null && volumeValid ? Math.round(value).toLocaleString() : fmt(value)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        <div style={{ marginBottom: 12 }}>
+                          <div style={{ color: C.muted, fontSize: 11, fontWeight: 950, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>Clustered zones</div>
+                          {[
+                            ["Resistance", resistanceZones, C.red],
+                            ["Support", supportZones, C.green],
+                          ].map(([group, zones, color]) => zones.length ? (
+                            <div key={`fs-${group}`} style={{ marginBottom: 8 }}>
+                              <div style={{ color, fontSize: 12, fontWeight: 900, marginBottom: 3 }}>{group}</div>
+                              {zones.map((z, i) => (
+                                <div key={`fs-${group}-${i}`} style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px solid ${C.border}`, padding: "4px 0" }}>
+                                  <span style={{ color: C.muted, fontSize: 12 }}>{z.count > 1 ? `${z.label} (${z.count} levels)` : z.label}</span>
+                                  <span style={{ color: C.muted, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{z.low === z.high ? round2(z.mid) : `${round2(z.low)}–${round2(z.high)}`}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : null)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </Card>
+              </div>
+            )}
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 14 }}>
+              <Card style={{ background: C.card2 }}>
+                <Title icon="🧩" title="Strategy modules" sub="Confirmation context only." />
+                <ModuleLine name="Trend" row={modules.trend} />
+                <ModuleLine name="Momentum" row={modules.momentum} />
+                <ModuleLine name="Volatility" row={modules.volatility} />
+                <ModuleLine name="Structure" row={modules.structure} />
+              </Card>
+              <Card style={{ background: C.card2 }}>
+                <Title icon="🕒" title="Multi-timeframe context" sub="Snapshot timeframes only." />
+                {Object.keys(timeframes).length ? Object.keys(timeframes).map((key) => {
+                  const row = timeframes[key] || {};
+                  const rowBias = row?.strategyModules?.aggregateBias || row?.trend || "unknown";
+                  return (
+                    <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: `1px solid ${C.border}`, padding: "8px 0", gap: 10 }}>
+                      <b>{key}</b>
+                      <span style={{ color: C.muted, fontSize: 12 }}>RSI {fmt(row.rsi14)} · StochK {fmt(row?.stochRsi14?.k)}</span>
+                      <Badge value={String(rowBias).includes("bear") ? "negative" : String(rowBias).includes("bull") ? "supportive" : "warning"}>{rowBias}</Badge>
+                    </div>
+                  );
+                }) : <p style={{ color: C.muted }}>No timeframe rows available.</p>}
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10 }}>
+                  <b>Consensus</b>
+                  <b style={{ color: String(mtf?.bias).includes("bear") ? C.red : String(mtf?.bias).includes("bull") ? C.green : C.gold }}>{mtf?.bias || "unknown"} · score {fmt(mtf?.score)}</b>
+                </div>
+              </Card>
+            </div>
+
+            <Card style={{ background: "rgba(245,158,11,0.08)", borderColor: "rgba(245,158,11,0.35)" }}>
+              <b style={{ color: C.gold }}>RSI/StochRSI wording:</b> <span style={{ color: C.muted }}>{requiredPhrase}</span>
+              <p style={{ color: C.muted, lineHeight: 1.65, marginBottom: 0 }}>
+                GC=F levels are a futures proxy and are not direct spot XAUUSD. This panel is a visual companion to deterministic Section 7, not a report generator and not a trading signal.
+              </p>
+            </Card>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  
+function TechnicalDashboardPanel() {
+  return (
+    <TechnicalPanelErrorBoundary>
+      <TechnicalDashboardPanelBody />
+    </TechnicalPanelErrorBoundary>
+  );
+}
+
+function Overview() {
     return (
       <div style={{ display: "grid", gridTemplateColumns: "1.2fr .8fr", gap: 16 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -9895,7 +11131,7 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.41.2.9",
+        appVersion: "GoldScope v2.41.3-ui.4.4.9",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -12187,10 +13423,68 @@ function canonicalizeSection6Wait(block, snapshot) {
   return s.trim();
 }
 
+
+function buildTechnicalConfirmationTextFromSnapshot(snapshot) {
+  const tech = snapshot?.technicalContext || {};
+  if (!tech || tech.status !== "available" || tech.usableForScenario === false) {
+    return "Technical context is unavailable. Do not use technical evidence as directional confirmation.";
+  }
+
+  const tf = tech?.timeframes?.["1h"] || {};
+  const q = tech?.dataQuality || {};
+  const macd = tf?.macd || {};
+  const adx = tf?.adx14 || {};
+  const bb = tf?.bollinger20 || {};
+  const kc = tf?.keltner20 || {};
+  const candle = tech?.candlestickPatterns || tf?.candlestickPatterns || {};
+  const strategy = tech?.strategyModules || tf?.strategyModules || {};
+  const modules = strategy?.modules || {};
+  const mtf = tech?.multiTimeframe || {};
+  const source = tech?.sourceSelection?.selected;
+  const sourceText = source
+    ? `${source.sourceName || tech.sourceName}:${source.symbol || tech.symbol}${source.range || source.interval ? ` ${source.range || ""}/${source.interval || ""}` : ""}`.trim()
+    : `${tech.sourceName || "unknown"}:${tech.symbol || "unknown"}`;
+
+  const requiredPhrase =
+    tech?.technicalLanguageHints?.requiredPhrase ||
+    tf?.technicalLanguageHints?.requiredPhrase ||
+    "RSI/StochRSI wording unavailable.";
+
+  const support = Array.isArray(tf?.support) ? tf.support.join(", ") : "none";
+  const resistance = Array.isArray(tf?.resistance) ? tf.resistance.join(", ") : "none";
+  const patterns = Array.isArray(candle?.patterns) && candle.patterns.length
+    ? candle.patterns.map((p) => p.name).join(", ")
+    : "none";
+
+  return [
+    "Technical context is available and usable only as confirmation context, not as a macro override.",
+    `Selected source is ${sourceText.includes("Yahoo:GC=F") || tech.symbol === "GC=F" ? "Yahoo:GC=F" : sourceText}, a gold futures proxy for XAUUSD, not direct spot XAUUSD.`,
+    `Data quality: ${q.qualityLabel || tech.reliability || "usable"} with score ${q.qualityScore ?? "unknown"}.`,
+    `Technical bias=${tech.technicalBias || "unknown"}; technicalConfidence=${tech.technicalConfidence ?? "unknown"}.`,
+    `Primary timeframe 1h: trend=${tf.trend || "unknown"}, momentum=${tf.momentum || "unknown"}, priceVsEMA200=${tf.priceVsEMA200 || "unknown"}.`,
+    `Required RSI/StochRSI wording: ${requiredPhrase}`,
+    `Expanded indicators: MACD state=${macd.state || "unknown"}, histogram=${macd.histogram ?? "unknown"}. ADX trendStrength=${adx.trendStrength || "unknown"}, direction=${adx.direction || "unknown"}. Bollinger position=${bb.position || "unknown"}, bandwidthPct=${bb.bandwidthPct ?? "unknown"}. Keltner position=${kc.position || "unknown"}, widthPct=${kc.widthPct ?? "unknown"}.`,
+    `Candlestick context: status=${candle.status || "unknown"}, bias=${candle.bias || "unknown"}, score=${candle.score ?? "unknown"}, names=${patterns}.`,
+    `Strategy modules: aggregateBias=${strategy.aggregateBias || "unknown"}, aggregateScore=${strategy.aggregateScore ?? "unknown"}; trend=${modules?.trend?.bias || "unknown"}(${modules?.trend?.score ?? "unknown"}), momentum=${modules?.momentum?.bias || "unknown"}(${modules?.momentum?.score ?? "unknown"}), volatility=${modules?.volatility?.bias || "unknown"}(${modules?.volatility?.score ?? "unknown"}), structure=${modules?.structure?.bias || "unknown"}(${modules?.structure?.score ?? "unknown"}).`,
+    `Support=${support}; resistance=${resistance}. These levels come from the selected technical proxy and are not trade instructions.`,
+    `Multi-timeframe context: bias=${mtf.bias || "unknown"}, score=${mtf.score ?? "unknown"}, conflicts=${Array.isArray(mtf.conflicts) && mtf.conflicts.length ? mtf.conflicts.join(", ") : "none"}.`,
+    snapshot?.alignmentContext?.explanation
+      ? `Alignment note: ${snapshot.alignmentContext.explanation}`
+      : "Alignment note: Technical context can confirm, weaken, or contradict macro context, but cannot override incomplete macro/event/replay evidence.",
+    "Technical context can confirm, weaken, or contradict macro context, but it cannot override blank CPI actual/forecast values, incomplete employment confirmation evidence, weak/rate-limited news, or limited/inconclusive replay evidence.",
+  ].join("\n");
+}
+
+
 function canonicalizeSection7Technical(snapshot) {
-  const deterministicTechnical = snapshot?.technicalConfirmationText || (typeof formatDeterministicTechnicalConfirmationText === "function" ? formatDeterministicTechnicalConfirmationText(snapshot) : "");
+  const deterministicTechnical =
+    snapshot?.technicalConfirmationText ||
+    (typeof formatDeterministicTechnicalConfirmationText === "function" ? formatDeterministicTechnicalConfirmationText(snapshot) : "") ||
+    buildTechnicalConfirmationTextFromSnapshot(snapshot);
+
   return `7. Technical confirmation\n${deterministicTechnical}`.trim();
 }
+
 
 function canonicalizeSection9Catalyst(block, snapshot) {
   let s = String(block || "").trim();
@@ -13149,7 +14443,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.2.9",
+        appVersion: "GoldScope v2.41.3-ui.4.4.9",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -13502,7 +14796,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.2.9",
+        appVersion: "GoldScope v2.41.3-ui.4.4.9",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -13705,7 +14999,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.2.9",
+        appVersion: "GoldScope v2.41.3-ui.4.4.9",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -13968,6 +15262,7 @@ ${err.stack || err.message || String(err)}`);
     control: <ControlCenter />,
     overview: <Overview />,
     chart: <TradingViewChart />,
+    technical: <TechnicalDashboardPanel />,
     news: <NewsPanel />,
     macro: <MacroDrivers />,
     calendar: <Calendar />,
@@ -13999,7 +15294,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.2.9</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.3-ui.4.4.9</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>

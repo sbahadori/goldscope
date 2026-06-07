@@ -1,0 +1,414 @@
+
+<h2 class="sr-only">XAUUSD / GC=F Technical Analysis Dashboard — bearish bias, oversold momentum, Wait-Neutral scenario</h2>
+
+<div style="font-size:12px;color:var(--color-text-secondary);padding:8px 0 4px;display:flex;justify-content:space-between;align-items:center;">
+  <span>Yahoo:GC=F · 1h proxy · <span style="color:#e24b4a;font-weight:500;">Bearish</span> · Confidence 75 · Quality 82/100</span>
+  <span style="background:var(--color-background-secondary);border:0.5px solid var(--color-border-tertiary);border-radius:6px;padding:3px 10px;">Wait-Neutral scenario</span>
+</div>
+
+<div style="position:relative;width:100%;height:320px;margin-bottom:4px;">
+  <canvas id="priceChart" role="img" aria-label="Simulated GC=F price chart with EMA20, EMA50, EMA200, Bollinger Bands, Keltner Channel, and support/resistance levels based on GoldScope technical report. Current price 4365 is below EMA200, indicating bearish trend.">Price near 4365, below EMA200 at 4503. EMA20=4418, EMA50=4457. Bearish structure.</canvas>
+</div>
+
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;">
+  <span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:24px;height:2px;background:#e24b4a;"></span>EMA 20</span>
+  <span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:24px;height:2px;background:#ba7517;"></span>EMA 50</span>
+  <span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:24px;height:2px;background:#185fa5;"></span>EMA 200</span>
+  <span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:24px;height:2px;background:rgba(53,126,200,0.5);border-top:1px dashed #378add;"></span>Bollinger</span>
+  <span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:24px;height:2px;background:rgba(157,62,182,0.5);border-top:1px dashed #a78bfa;"></span>Keltner</span>
+  <span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:10px;height:10px;background:rgba(16,185,129,0.25);border:1px solid #059669;border-radius:2px;"></span>Support zone</span>
+  <span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:10px;height:10px;background:rgba(226,75,74,0.15);border:1px solid #e24b4a;border-radius:2px;"></span>Resistance zone</span>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+  <div style="position:relative;height:100px;">
+    <canvas id="rsiChart" role="img" aria-label="RSI14 chart showing oversold reading of 23.79 on 1h timeframe. Horizontal lines at 30 and 70.">RSI14=23.79 (oversold), below 30 threshold.</canvas>
+  </div>
+  <div style="position:relative;height:100px;">
+    <canvas id="macdChart" role="img" aria-label="MACD chart showing bearish state with histogram at -7.59.">MACD bearish, histogram=-7.59, signal below MACD line.</canvas>
+  </div>
+</div>
+
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px;">
+  <div style="background:var(--color-background-secondary);border-radius:8px;padding:10px 12px;">
+    <div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:4px;">ADX (1h)</div>
+    <div style="font-size:18px;font-weight:500;color:#e24b4a;">58.8</div>
+    <div style="font-size:11px;color:var(--color-text-secondary);">Strong bearish</div>
+    <div style="margin-top:6px;background:var(--color-border-tertiary);border-radius:3px;height:4px;overflow:hidden;">
+      <div style="height:100%;width:84%;background:#e24b4a;border-radius:3px;"></div>
+    </div>
+  </div>
+  <div style="background:var(--color-background-secondary);border-radius:8px;padding:10px 12px;">
+    <div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:4px;">StochRSI K (1h)</div>
+    <div style="font-size:18px;font-weight:500;color:#ba7517;">12.8</div>
+    <div style="font-size:11px;color:var(--color-text-secondary);">Oversold</div>
+    <div style="margin-top:6px;background:var(--color-border-tertiary);border-radius:3px;height:4px;overflow:hidden;">
+      <div style="height:100%;width:13%;background:#ba7517;border-radius:3px;"></div>
+    </div>
+  </div>
+  <div style="background:var(--color-background-secondary);border-radius:8px;padding:10px 12px;">
+    <div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:4px;">Bollinger BW</div>
+    <div style="font-size:18px;font-weight:500;">5.18%</div>
+    <div style="font-size:11px;color:var(--color-text-secondary);">Inside bands</div>
+    <div style="margin-top:6px;background:var(--color-border-tertiary);border-radius:3px;height:4px;overflow:hidden;">
+      <div style="height:100%;width:38%;background:#185fa5;border-radius:3px;"></div>
+    </div>
+  </div>
+  <div style="background:var(--color-background-secondary);border-radius:8px;padding:10px 12px;">
+    <div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:4px;">Strategy score</div>
+    <div style="font-size:18px;font-weight:500;color:#e24b4a;">−7</div>
+    <div style="font-size:11px;color:var(--color-text-secondary);">Bearish bias</div>
+    <div style="margin-top:6px;background:var(--color-border-tertiary);border-radius:3px;height:4px;overflow:hidden;">
+      <div style="height:100%;width:78%;background:#e24b4a;border-radius:3px;"></div>
+    </div>
+  </div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+  <div style="background:var(--color-background-secondary);border-radius:8px;padding:10px 12px;">
+    <div style="font-size:11px;color:var(--color-text-secondary);font-weight:500;margin-bottom:8px;">Strategy modules</div>
+    <div style="display:flex;flex-direction:column;gap:5px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:12px;">Trend</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <div style="width:80px;background:var(--color-border-tertiary);border-radius:3px;height:5px;overflow:hidden;"><div style="height:100%;width:100%;background:#e24b4a;border-radius:3px;"></div></div>
+          <span style="font-size:11px;color:#e24b4a;font-weight:500;">−4</span>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:12px;">Momentum</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <div style="width:80px;background:var(--color-border-tertiary);border-radius:3px;height:5px;overflow:hidden;"><div style="height:100%;width:60%;background:#ba7517;border-radius:3px;"></div></div>
+          <span style="font-size:11px;color:#ba7517;font-weight:500;">−2</span>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:12px;">Volatility</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <div style="width:80px;background:var(--color-border-tertiary);border-radius:3px;height:5px;overflow:hidden;"><div style="height:100%;width:20%;background:#888780;border-radius:3px;"></div></div>
+          <span style="font-size:11px;color:var(--color-text-secondary);font-weight:500;">−0.5</span>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:12px;">Structure</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <div style="width:80px;background:var(--color-border-tertiary);border-radius:3px;height:5px;overflow:hidden;"><div style="height:100%;width:20%;background:#888780;border-radius:3px;"></div></div>
+          <span style="font-size:11px;color:var(--color-text-secondary);font-weight:500;">−0.5</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div style="background:var(--color-background-secondary);border-radius:8px;padding:10px 12px;">
+    <div style="font-size:11px;color:var(--color-text-secondary);font-weight:500;margin-bottom:8px;">Multi-timeframe consensus</div>
+    <div style="display:flex;flex-direction:column;gap:5px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:12px;">1h</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:11px;color:var(--color-text-secondary);">RSI 23.8</span>
+          <span style="font-size:11px;background:rgba(226,75,74,0.12);color:#e24b4a;border-radius:4px;padding:1px 7px;">Bearish</span>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:12px;">4h</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:11px;color:var(--color-text-secondary);">RSI 28.7</span>
+          <span style="font-size:11px;background:rgba(226,75,74,0.12);color:#e24b4a;border-radius:4px;padding:1px 7px;">Bearish</span>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:12px;">1d</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:11px;color:var(--color-text-secondary);">RSI 32.3</span>
+          <span style="font-size:11px;background:rgba(186,117,23,0.12);color:#ba7517;border-radius:4px;padding:1px 7px;">Mild-bear</span>
+        </div>
+      </div>
+      <div style="border-top:0.5px solid var(--color-border-tertiary);margin-top:6px;padding-top:6px;display:flex;justify-content:space-between;">
+        <span style="font-size:12px;font-weight:500;">Score</span>
+        <span style="font-size:12px;font-weight:500;color:#e24b4a;">−16 · No conflicts</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="background:rgba(186,117,23,0.08);border:0.5px solid rgba(186,117,23,0.35);border-radius:8px;padding:10px 14px;font-size:12px;color:var(--color-text-secondary);">
+  <span style="color:#ba7517;font-weight:500;">Alignment note:</span> Macro read is supportive while technical context is bearish — technicals weaken the bullish case and force Wait-Neutral. Levels shown are GC=F proxy, not direct spot XAUUSD.
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+const textColor = isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.5)';
+const gridColor = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
+
+// Price levels from report
+const EMA20 = 4417.86, EMA50 = 4457.46, EMA200 = 4503.14;
+const BBupper = 4545.26, BBmiddle = 4432.7, BBlower = 4320.13;
+const KCupper = 4464.36, KCmiddle = 4417.86, KClower = 4371.36;
+const supports = [4336.6, 4338.3, 4339.8];
+const resistances = [4543.2, 4542.4, 4541.9];
+const currentPrice = 4365.3;
+
+// Simulated recent candle history descending from EMA50 region to current
+// 24 hourly bars ending at ~4365
+const n = 24;
+const labels = [];
+for (let i = n-1; i >= 0; i--) {
+  const h = i % 12 === 0 ? '00:00' : (i % 6 === 0 ? '12:00' : `${((n-1-i)*2)%24}:00`);
+  labels.push(h);
+}
+
+// Simulate a decline from ~4490 to 4365
+const prices = [];
+let p = 4492;
+for (let i = 0; i < n; i++) {
+  const noise = (Math.random() - 0.55) * 18;
+  p = Math.max(4330, p + noise - 5);
+  prices.push(Math.round(p * 10) / 10);
+}
+prices[n-1] = currentPrice;
+
+// Flat arrays for bands
+const bbUpperArr = Array(n).fill(BBupper);
+const bbLowerArr = Array(n).fill(BBlower);
+const kcUpperArr = Array(n).fill(KCupper);
+const kcLowerArr = Array(n).fill(KClower);
+const ema20Arr = Array(n).fill(EMA20);
+const ema50Arr = Array(n).fill(EMA50);
+const ema200Arr = Array(n).fill(EMA200);
+
+// Price chart
+const pCtx = document.getElementById('priceChart').getContext('2d');
+new Chart(pCtx, {
+  type: 'line',
+  data: {
+    labels,
+    datasets: [
+      {
+        label: 'BB upper', data: bbUpperArr,
+        borderColor: 'rgba(55,138,221,0.45)', borderWidth: 1, borderDash: [4,3],
+        pointRadius: 0, fill: false, tension: 0
+      },
+      {
+        label: 'BB lower', data: bbLowerArr,
+        borderColor: 'rgba(55,138,221,0.45)', borderWidth: 1, borderDash: [4,3],
+        pointRadius: 0, fill: '-1',
+        backgroundColor: 'rgba(55,138,221,0.04)', tension: 0
+      },
+      {
+        label: 'KC upper', data: kcUpperArr,
+        borderColor: 'rgba(167,139,250,0.45)', borderWidth: 1, borderDash: [2,4],
+        pointRadius: 0, fill: false, tension: 0
+      },
+      {
+        label: 'KC lower', data: kcLowerArr,
+        borderColor: 'rgba(167,139,250,0.45)', borderWidth: 1, borderDash: [2,4],
+        pointRadius: 0, fill: '-1',
+        backgroundColor: 'rgba(167,139,250,0.04)', tension: 0
+      },
+      {
+        label: 'EMA 200', data: ema200Arr,
+        borderColor: '#185fa5', borderWidth: 1.5,
+        pointRadius: 0, fill: false, tension: 0
+      },
+      {
+        label: 'EMA 50', data: ema50Arr,
+        borderColor: '#ba7517', borderWidth: 1.5,
+        pointRadius: 0, fill: false, tension: 0
+      },
+      {
+        label: 'EMA 20', data: ema20Arr,
+        borderColor: '#e24b4a', borderWidth: 1.5,
+        pointRadius: 0, fill: false, tension: 0
+      },
+      {
+        label: 'Price', data: prices,
+        borderColor: isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.8)',
+        borderWidth: 2, pointRadius: 0,
+        fill: false, tension: 0.2
+      }
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    animation: false,
+    plugins: {
+      legend: { display: false },
+      annotation: {},
+      tooltip: {
+        mode: 'index', intersect: false,
+        callbacks: {
+          label: ctx => ctx.dataset.label === 'Price' ? `Price: ${ctx.raw}` : `${ctx.dataset.label}: ${ctx.raw}`
+        }
+      }
+    },
+    scales: {
+      x: {
+        ticks: { color: textColor, font: { size: 10 }, maxTicksLimit: 8 },
+        grid: { color: gridColor }
+      },
+      y: {
+        min: 4290, max: 4580,
+        ticks: { color: textColor, font: { size: 10 }, callback: v => v.toFixed(0) },
+        grid: { color: gridColor }
+      }
+    }
+  },
+  plugins: [{
+    id: 'zones',
+    beforeDraw(chart) {
+      const { ctx, scales: { x, y } } = chart;
+      const left = x.left, right = x.right;
+      // Support zone
+      const sTop = y.getPixelForValue(4342);
+      const sBot = y.getPixelForValue(4333);
+      ctx.fillStyle = 'rgba(16,185,129,0.12)';
+      ctx.fillRect(left, sTop, right - left, sBot - sTop);
+      ctx.strokeStyle = 'rgba(5,150,105,0.5)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.moveTo(left, sTop); ctx.lineTo(right, sTop); ctx.stroke();
+      // Resistance zone
+      const rTop = y.getPixelForValue(4545);
+      const rBot = y.getPixelForValue(4540);
+      ctx.fillStyle = 'rgba(226,75,74,0.09)';
+      ctx.fillRect(left, rTop, right - left, rBot - rTop);
+      ctx.strokeStyle = 'rgba(226,75,74,0.5)';
+      ctx.beginPath(); ctx.moveTo(left, rTop); ctx.lineTo(right, rTop); ctx.stroke();
+      ctx.setLineDash([]);
+      // Label
+      ctx.fillStyle = 'rgba(5,150,105,0.8)';
+      ctx.font = '10px sans-serif';
+      ctx.fillText('Support ~4337-4340', left + 4, sTop - 3);
+      ctx.fillStyle = 'rgba(226,75,74,0.8)';
+      ctx.fillText('Resistance ~4541-4543', left + 4, rTop - 3);
+      // Current price line
+      const curY = y.getPixelForValue(currentPrice);
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = 0.8;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(left, curY); ctx.lineTo(right, curY); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.5)';
+      ctx.font = '10px sans-serif';
+      ctx.fillText(`${currentPrice}`, right - 40, curY - 3);
+    }
+  }]
+});
+
+// RSI chart
+const rsiCtx = document.getElementById('rsiChart').getContext('2d');
+const rsiData = [];
+let r = 65;
+for (let i = 0; i < n; i++) {
+  r = Math.max(10, Math.min(85, r + (Math.random() - 0.58) * 8));
+  rsiData.push(Math.round(r * 10) / 10);
+}
+rsiData[n-1] = 23.79;
+
+new Chart(rsiCtx, {
+  type: 'line',
+  data: {
+    labels,
+    datasets: [
+      {
+        label: 'RSI 14', data: rsiData,
+        borderColor: '#185fa5', borderWidth: 1.5,
+        pointRadius: 0, fill: false, tension: 0.3
+      }
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    animation: false,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: { label: ctx => `RSI: ${ctx.raw}` }
+      }
+    },
+    scales: {
+      x: { display: false },
+      y: {
+        min: 0, max: 100,
+        ticks: { color: textColor, font: { size: 9 }, stepSize: 25 },
+        grid: { color: gridColor }
+      }
+    }
+  },
+  plugins: [{
+    id: 'rsiLines',
+    beforeDraw(chart) {
+      const { ctx, scales: { x, y } } = chart;
+      const left = x.left, right = x.right;
+      [[30, 'rgba(226,75,74,0.4)', 'Oversold 30'], [70, 'rgba(186,117,23,0.4)', 'Overbought 70']].forEach(([val, col, lbl]) => {
+        const py = y.getPixelForValue(val);
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.moveTo(left, py); ctx.lineTo(right, py); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = col;
+        ctx.font = '9px sans-serif';
+        ctx.fillText(lbl, left + 2, py - 2);
+      });
+      // Fill oversold region
+      ctx.fillStyle = 'rgba(226,75,74,0.07)';
+      ctx.fillRect(left, y.getPixelForValue(30), right - left, y.bottom - y.getPixelForValue(30));
+    }
+  }]
+});
+
+// MACD chart
+const macdCtx = document.getElementById('macdChart').getContext('2d');
+const macdLine = [], signalLine = [], histogram = [];
+let m = 5;
+for (let i = 0; i < n; i++) {
+  m = Math.min(10, Math.max(-20, m + (Math.random() - 0.6) * 3));
+  const s = m + (Math.random() - 0.4) * 2;
+  macdLine.push(Math.round(m * 100) / 100);
+  signalLine.push(Math.round(s * 100) / 100);
+  histogram.push(Math.round((m - s) * 100) / 100);
+}
+macdLine[n-1] = -36.88; signalLine[n-1] = -26.89; histogram[n-1] = -7.59;
+
+new Chart(macdCtx, {
+  type: 'bar',
+  data: {
+    labels,
+    datasets: [
+      {
+        label: 'Histogram', data: histogram,
+        backgroundColor: histogram.map(v => v >= 0 ? 'rgba(16,185,129,0.6)' : 'rgba(226,75,74,0.6)'),
+        order: 2
+      },
+      {
+        label: 'MACD', data: macdLine,
+        type: 'line', borderColor: '#185fa5', borderWidth: 1.5,
+        pointRadius: 0, fill: false, tension: 0.3, order: 1
+      },
+      {
+        label: 'Signal', data: signalLine,
+        type: 'line', borderColor: '#e24b4a', borderWidth: 1, borderDash: [3,2],
+        pointRadius: 0, fill: false, tension: 0.3, order: 1
+      }
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    animation: false,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.raw}` }
+      }
+    },
+    scales: {
+      x: { display: false },
+      y: {
+        ticks: { color: textColor, font: { size: 9 }, maxTicksLimit: 4 },
+        grid: { color: gridColor }
+      }
+    }
+  }
+});
+</script>
