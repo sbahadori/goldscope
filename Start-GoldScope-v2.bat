@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title GoldScope v2.41.2.2 - Employment Intelligence Narrative Injection
+title GoldScope v2.41.2.4.6 - Final Presentation Cleanup Pass
 cd /d "%~dp0"
 
 echo ====================================================
-echo   GoldScope v2.41.2.2 - Employment Intelligence Narrative Injection
+echo   GoldScope v2.41.2.4.6 - Final Presentation Cleanup Pass
 echo ====================================================
 echo.
 echo One launcher only. No separate AI proxy is required.
