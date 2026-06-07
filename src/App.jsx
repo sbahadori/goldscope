@@ -8201,6 +8201,7 @@ function TechnicalDashboardPanel() {
   );
 }
 
+
 function TradeScenarioDashboardPanel() {
   const readSnapshot = () => {
     try {
@@ -8238,143 +8239,337 @@ function TradeScenarioDashboardPanel() {
   }, [snapshot]);
 
   const plan = snapshot?.tradeScenarioPlan || {};
-  const primary = plan.primaryPlan || {};
-  const alternatives = Array.isArray(plan.alternativePlans) ? plan.alternativePlans : [];
+  const primary = plan.primaryPlan || plan.primary || {};
+  const alternativesRaw = Array.isArray(plan.alternativePlans)
+    ? plan.alternativePlans
+    : Array.isArray(plan.alternatives)
+      ? plan.alternatives
+      : [plan.alternative1, plan.alternative2, plan.alternative3].filter(Boolean);
+
+  const rankedAlternatives = alternativesRaw
+    .map((scenario, index) => ({ ...scenario, _rank: Number.isFinite(Number(scenario?.rank)) ? Number(scenario.rank) : index + 1 }))
+    .sort((a, b) => a._rank - b._rank);
+
   const overlay = plan.fundamentalOverlay || {};
   const technical = snapshot?.technicalContext || {};
   const employment = snapshot?.employmentEvent || {};
-  const systemState = snapshot?.deterministicScenarioLab?.dominantScenario || snapshot?.scenario || "Wait-Neutral";
+  const systemState = snapshot?.deterministicScenarioLab?.dominantScenario || snapshot?.deterministicScenarioLab?.dominant || snapshot?.scenario || "Wait-Neutral";
 
-  const fmt = (v) => {
-    if (Array.isArray(v)) return v.map(fmt).join(" → ");
-    if (v === null || v === undefined || v === "") return "n/a";
-    if (typeof v === "number" && Number.isFinite(v)) return String(Math.round(v));
-    return String(v);
+  const fmt = (value) => {
+    if (Array.isArray(value)) return value.map(fmt).join(" → ");
+    if (value === null || value === undefined || value === "") return "n/a";
+    if (typeof value === "number" && Number.isFinite(value)) return String(Math.round(value));
+    return String(value).replace(/_/g, " ");
   };
 
-  const scenarioType = (scenario = {}) => {
-    const name = String(scenario.name || "").toLowerCase();
-    const type = String(scenario.type || "").toLowerCase();
-    if (type.includes("long") || name.includes("buy") || name.includes("bounce")) return "long";
-    if (type.includes("short") || name.includes("sell")) return "short";
+  const scenarioTitle = (scenario = {}, fallback = "Scenario") =>
+    scenario.name || scenario.title || scenario.label || fallback;
+
+  const detectScenarioKind = (scenario = {}) => {
+    const text = `${scenario?.id || ""} ${scenario?.name || ""} ${scenario?.title || ""} ${scenario?.type || ""}`.toLowerCase();
+    if (text.includes("rebound")) return "sell_on_rebound";
+    if (text.includes("breakdown")) return "breakdown_sell";
+    if (text.includes("support") || text.includes("bounce")) return "support_bounce_buy";
+    if (text.includes("breakout")) return "breakout_buy";
+    if (text.includes("buy") || text.includes("long")) return "breakout_buy";
+    if (text.includes("sell") || text.includes("short")) return "breakdown_sell";
     return "neutral";
   };
 
-  const scenarioMeta = (scenario = {}, idx = 0) => {
-    const type = scenarioType(scenario);
-    const primaryFlag = idx === -1;
-    const color = type === "long" ? C.green : type === "short" ? C.red : C.gold;
-    const bg = type === "long" ? "#052e1a66" : type === "short" ? "#3b0d0d66" : "#2b210966";
-    const icon = type === "long" ? "↗" : type === "short" ? "↘" : "◇";
-    return {
-      color,
-      bg,
-      icon,
-      tag: primaryFlag ? "Primary" : `Alt ${idx + 1}`,
-      border: primaryFlag ? `2px solid ${color}66` : `1px solid ${C.border}`,
-    };
+  const scenarioDirection = (scenario = {}) => {
+    const kind = detectScenarioKind(scenario);
+    if (kind === "support_bounce_buy" || kind === "breakout_buy") return "bullish";
+    if (kind === "sell_on_rebound" || kind === "breakdown_sell") return "bearish";
+    const type = String(scenario?.type || "").toLowerCase();
+    if (type.includes("long")) return "bullish";
+    if (type.includes("short")) return "bearish";
+    return "neutral";
   };
 
+  const directionMeta = (scenario = {}, primaryFlag = false) => {
+    const direction = scenarioDirection(scenario);
+    const color = direction === "bullish" ? C.green : direction === "bearish" ? C.red : C.gold;
+    const bg = direction === "bullish" ? "#052e1a66" : direction === "bearish" ? "#3b0d0d66" : "#2b210966";
+    const icon = direction === "bullish" ? "↗" : direction === "bearish" ? "↘" : "◇";
+    return { direction, color, bg, icon, border: primaryFlag ? `2px solid ${color}77` : `1px solid ${C.border}` };
+  };
+
+  const priorityLabel = (index) => {
+    if (index === 0) return "Higher priority";
+    if (index === 1) return "Medium priority";
+    return "Lower priority";
+  };
+
+  const scenarioEntry = (scenario = {}) => scenario.entryZone ? fmt(scenario.entryZone) : (scenario.entryTrigger || scenario.trigger || scenario.saferEntry || "trigger required");
+  const scenarioStop = (scenario = {}) => scenario.stopLoss ? fmt(scenario.stopLoss) : "required";
+  const scenarioTrigger = (scenario = {}) => scenario.activationTrigger || scenario.trigger || scenario.entryTrigger || scenario.validity || "Trigger confirmation required.";
+  const scenarioTargets = (scenario = {}) => Array.isArray(scenario.takeProfit) ? scenario.takeProfit : Array.isArray(scenario.targets) ? scenario.targets : [];
+
   const MetricBox = ({ label, value, color = C.text }) => (
-    <div style={{ background: "#050b14", border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 10px", textAlign: "center" }}>
-      <div style={{ color: C.muted, fontSize: 11, marginBottom: 6 }}>{label}</div>
+    <div style={{ background: "#050b14", border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 10px", textAlign: "left", minHeight: 72 }}>
+      <div style={{ color: C.muted, fontSize: 11, marginBottom: 6, fontWeight: 850 }}>{label}</div>
       <div style={{ color, fontSize: 13, fontWeight: 950, lineHeight: 1.35 }}>{value || "n/a"}</div>
     </div>
   );
 
-  const Targets = ({ scenario, color }) => {
-    const targets = Array.isArray(scenario?.takeProfit) ? scenario.takeProfit : [];
-    if (!targets.length) return null;
+  const ScenarioTargets = ({ scenario, color }) => {
+    const targets = scenarioTargets(scenario);
+    if (!targets.length) return <span style={{ color: C.muted, fontSize: 12 }}>Targets unavailable</span>;
     return (
-      <div style={{ marginTop: 16 }}>
-        <div style={{ color: C.muted, fontSize: 12, marginBottom: 8 }}>Targets</div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {targets.map((target, i) => (
-            <span key={`${scenario.name || "scenario"}-tp-${i}`} style={{
-              background: i === targets.length - 1 ? `${color}18` : "#050b14",
-              border: `1px solid ${i === targets.length - 1 ? `${color}55` : C.border}`,
-              color: i === targets.length - 1 ? color : C.text,
-              borderRadius: 10,
-              padding: "7px 10px",
-              fontSize: 12,
-              fontWeight: 900,
-            }}>
-              {i === targets.length - 1 ? "Max" : `TP${i + 1}`}: {fmt(target)}
-            </span>
-          ))}
-        </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {targets.map((target, index) => (
+          <span key={`${scenarioTitle(scenario)}-target-${index}`} style={{
+            background: index === targets.length - 1 ? `${color}18` : "#050b14",
+            border: `1px solid ${index === targets.length - 1 ? `${color}55` : C.border}`,
+            color: index === targets.length - 1 ? color : C.text,
+            borderRadius: 10,
+            padding: "7px 10px",
+            fontSize: 12,
+            fontWeight: 900,
+          }}>
+            {index === targets.length - 1 ? "Max" : `TP${index + 1}`}: {fmt(target)}
+          </span>
+        ))}
       </div>
     );
   };
 
-  const Sources = ({ scenario }) => {
+  const ScenarioSources = ({ scenario }) => {
     const sources = scenario?.levelSources || {};
     const renderSourceList = (label, items) => {
       const list = Array.isArray(items) ? items : [];
       if (!list.length) return null;
       return (
-        <div style={{ marginTop: 8 }}>
+        <div style={{ marginTop: 7 }}>
           <b style={{ color: C.muted, fontSize: 11 }}>{label}: </b>
           <span style={{ color: C.muted, fontSize: 11, lineHeight: 1.55 }}>
-            {list.map((x) => `${x.source || "source"}${x.level !== undefined ? ` ${fmt(x.level)}` : ""}`).join("; ")}
+            {list.map((item) => `${item.source || "source"}${item.level !== undefined ? ` ${fmt(item.level)}` : ""}`).join("; ")}
           </span>
         </div>
       );
     };
     return (
-      <div style={{ marginTop: 12 }}>
+      <div style={{ marginTop: 12, borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
         {renderSourceList("Entry source", sources.entryZone || sources.entryTrigger)}
         {renderSourceList("Stop source", sources.stopLoss)}
-        {renderSourceList("Target source", sources.takeProfit)}
+        {renderSourceList("Target source", sources.takeProfit || sources.targets)}
       </div>
     );
   };
 
-  const ScenarioCard = ({ scenario, idx = 0, primaryFlag = false }) => {
-    const meta = scenarioMeta(scenario, primaryFlag ? -1 : idx);
-    const entry = scenario.entryZone ? fmt(scenario.entryZone) : scenario.entryTrigger || scenario.trigger || "trigger required";
-    const stop = scenario.stopLoss ? fmt(scenario.stopLoss) : "required";
-    const trigger = scenario.trigger || scenario.entryTrigger || scenario.validity || "Trigger confirmation required.";
-    const title = scenario.name || (primaryFlag ? "Primary scenario" : "Alternative scenario");
+  const ScenarioPathMiniChart = ({ scenario, primaryFlag = false }) => {
+    const kind = detectScenarioKind(scenario);
+    const meta = directionMeta(scenario, primaryFlag);
+    const stroke = meta.color;
+    const chartData = {
+      sell_on_rebound: {
+        path: "M 18 125 C 62 92, 104 70, 142 82 C 180 96, 222 132, 282 150",
+        label: "Rebound → rejection → lower",
+        trigger: [145, 82],
+        entry: [115, 76],
+        stop: [160, 58],
+        target: [258, 146],
+      },
+      breakdown_sell: {
+        path: "M 18 78 L 98 78 L 135 120 C 157 108, 182 102, 205 118 L 282 154",
+        label: "Range → break → retest → lower",
+        trigger: [135, 120],
+        entry: [190, 108],
+        stop: [112, 64],
+        target: [260, 148],
+      },
+      support_bounce_buy: {
+        path: "M 18 65 C 60 95, 98 132, 137 128 C 178 118, 226 86, 282 76",
+        label: "Support touch → bounce → recovery",
+        trigger: [140, 128],
+        entry: [120, 132],
+        stop: [105, 148],
+        target: [250, 80],
+      },
+      breakout_buy: {
+        path: "M 18 122 L 118 122 L 154 78 C 178 92, 202 92, 225 76 L 282 54",
+        label: "Range → breakout → hold → higher",
+        trigger: [154, 78],
+        entry: [190, 92],
+        stop: [138, 130],
+        target: [260, 60],
+      },
+      neutral: {
+        path: "M 18 104 C 70 88, 112 120, 156 102 C 200 84, 238 122, 282 100",
+        label: "Conditional path",
+        trigger: [150, 103],
+        entry: [120, 115],
+        stop: [95, 135],
+        target: [250, 94],
+      },
+    }[kind] || {
+      path: "M 18 104 C 70 88, 112 120, 156 102 C 200 84, 238 122, 282 100",
+      label: "Conditional path",
+      trigger: [150, 103],
+      entry: [120, 115],
+      stop: [95, 135],
+      target: [250, 94],
+    };
+
+    const Marker = ({ point, label, color }) => (
+      <g>
+        <circle cx={point[0]} cy={point[1]} r="4.2" fill={color} stroke="#020617" strokeWidth="2" />
+        <text x={point[0] + 7} y={point[1] - 6} fill={color} fontSize="9" fontWeight="800">{label}</text>
+      </g>
+    );
 
     return (
-      <Card style={{ background: "#0b1220", border: meta.border, boxShadow: "0 18px 50px rgba(0,0,0,.25)", textAlign: "left" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "flex-start", marginBottom: 14 }}>
+      <div style={{ background: "#050b14", border: `1px solid ${C.border}`, borderRadius: 16, padding: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 7 }}>
+          <span style={{ color: C.muted, fontSize: 11, fontWeight: 850 }}>Schematic scenario path</span>
+          <span style={{ color: stroke, fontSize: 11, fontWeight: 950 }}>{chartData.label}</span>
+        </div>
+        <svg viewBox="0 0 300 180" width="100%" height={primaryFlag ? 210 : 180} style={{ display: "block" }}>
+          <defs>
+            <linearGradient id={`scenarioFill-${kind}-${primaryFlag ? "p" : "a"}`} x1="0" x2="1">
+              <stop offset="0%" stopColor={stroke} stopOpacity="0.08" />
+              <stop offset="100%" stopColor={stroke} stopOpacity="0.0" />
+            </linearGradient>
+          </defs>
+          {[40, 80, 120, 160].map((y) => (
+            <line key={y} x1="18" y1={y} x2="282" y2={y} stroke="rgba(148,163,184,.14)" strokeWidth="1" />
+          ))}
+          <line x1="18" y1="142" x2="282" y2="142" stroke="rgba(148,163,184,.18)" strokeDasharray="5 6" />
+          <path d={chartData.path} fill="none" stroke={stroke} strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+          <path d={`${chartData.path} L 282 170 L 18 170 Z`} fill={`url(#scenarioFill-${kind}-${primaryFlag ? "p" : "a"})`} />
+          <Marker point={chartData.trigger} label="Trigger" color={C.gold} />
+          <Marker point={chartData.entry} label="Entry" color={stroke} />
+          <Marker point={chartData.stop} label="SL" color={C.red} />
+          <Marker point={chartData.target} label="TP" color={kind.includes("buy") ? C.green : C.blue} />
+        </svg>
+      </div>
+    );
+  };
+
+  const ScenarioFlowSteps = ({ scenario }) => {
+    const meta = directionMeta(scenario);
+    const targets = scenarioTargets(scenario);
+    const steps = [
+      { label: "Trigger", value: scenarioTrigger(scenario), color: C.gold },
+      { label: "Entry", value: scenarioEntry(scenario), color: meta.color },
+      { label: "Stop", value: scenarioStop(scenario), color: C.red },
+      { label: "Targets", value: targets.length ? fmt(targets) : "n/a", color: C.blue },
+    ];
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 10 }}>
+        {steps.map((step, index) => (
+          <div key={step.label} style={{ position: "relative", background: "#050b14", border: `1px solid ${C.border}`, borderRadius: 14, padding: "11px 10px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", marginBottom: 7 }}>
+              <span style={{ color: C.muted, fontSize: 11, fontWeight: 850 }}>{step.label}</span>
+              {index < steps.length - 1 && <span style={{ color: C.muted, fontSize: 12 }}>→</span>}
+            </div>
+            <div style={{ color: step.color, fontWeight: 950, lineHeight: 1.38, fontSize: 12 }}>{step.value}</div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const ScenarioValueGrid = ({ scenario, primaryFlag = false }) => {
+    const meta = directionMeta(scenario, primaryFlag);
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 10 }}>
+        <MetricBox label={scenario.entryZone ? "Entry zone" : "Entry trigger"} value={scenarioEntry(scenario)} color={meta.color} />
+        <MetricBox label="Stop loss" value={scenarioStop(scenario)} color={C.text} />
+        <MetricBox label="Activation trigger" value={scenarioTrigger(scenario)} color={C.gold} />
+        <div style={{ background: "#050b14", border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 10px", textAlign: "left", minHeight: 72 }}>
+          <div style={{ color: C.muted, fontSize: 11, marginBottom: 8, fontWeight: 850 }}>Targets</div>
+          <ScenarioTargets scenario={scenario} color={meta.color} />
+        </div>
+      </div>
+    );
+  };
+
+  const TradeScenarioHeroCard = ({ scenario }) => {
+    const meta = directionMeta(scenario, true);
+    const title = scenarioTitle(scenario, "Primary scenario");
+    return (
+      <Card style={{ background: "linear-gradient(135deg, rgba(15,23,42,.98), rgba(30,41,59,.76))", border: meta.border, boxShadow: "0 22px 70px rgba(0,0,0,.32)", textAlign: "left" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(280px, .95fr) minmax(330px, 1.05fr)", gap: 18, alignItems: "stretch" }}>
           <div>
-            <span style={{ display: "inline-block", background: meta.bg, color: meta.color, border: `1px solid ${meta.color}44`, borderRadius: 9, padding: "5px 9px", fontSize: 11, fontWeight: 950 }}>
-              {meta.tag}
-            </span>
-            <h2 style={{ color: C.text, margin: "11px 0 0", fontSize: 19 }}>{title}</h2>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "flex-start", marginBottom: 12 }}>
+              <div>
+                <span style={{ display: "inline-block", background: meta.bg, color: meta.color, border: `1px solid ${meta.color}55`, borderRadius: 999, padding: "6px 11px", fontSize: 11, fontWeight: 950 }}>
+                  Primary · Main scenario
+                </span>
+                <h2 style={{ color: C.text, margin: "12px 0 0", fontSize: 25, letterSpacing: -0.3 }}>{title}</h2>
+              </div>
+              <div style={{ color: meta.color, background: meta.bg, borderRadius: 16, width: 52, height: 52, display: "grid", placeItems: "center", fontSize: 30, fontWeight: 950 }}>
+                {meta.icon}
+              </div>
+            </div>
+
+            <p style={{ color: C.muted, fontSize: 13, lineHeight: 1.75, margin: "0 0 14px" }}>
+              {scenario.rationale || "Primary scenario is conditional and requires trigger confirmation."}
+            </p>
+
+            <ScenarioValueGrid scenario={scenario} primaryFlag />
+            {scenario.saferEntry && (
+              <p style={{ color: C.blue, fontSize: 12, lineHeight: 1.65, margin: "13px 0 0" }}>
+                Safer entry: <b>{scenario.saferEntry}</b>
+              </p>
+            )}
+          </div>
+
+          <div>
+            <ScenarioPathMiniChart scenario={scenario} primaryFlag />
+            <ScenarioSources scenario={scenario} />
+          </div>
+        </div>
+      </Card>
+    );
+  };
+
+  const ScenarioTimelineCard = ({ scenario, index }) => {
+    const meta = directionMeta(scenario);
+    const title = scenarioTitle(scenario, `Alternative ${index + 1}`);
+    return (
+      <Card style={{ background: "#0b1220", border: `1px solid ${meta.color}44`, boxShadow: "0 18px 50px rgba(0,0,0,.23)", textAlign: "left" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "flex-start", marginBottom: 13, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ display: "inline-block", background: meta.bg, color: meta.color, border: `1px solid ${meta.color}44`, borderRadius: 999, padding: "5px 9px", fontSize: 11, fontWeight: 950 }}>
+                Alt {index + 1}
+              </span>
+              <span style={{ display: "inline-block", background: "#050b14", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 999, padding: "5px 9px", fontSize: 11, fontWeight: 900 }}>
+                {priorityLabel(index)}
+              </span>
+            </div>
+            <h2 style={{ color: C.text, margin: "11px 0 0", fontSize: 21 }}>{title}</h2>
+            <p style={{ color: C.muted, fontSize: 12, lineHeight: 1.7, margin: "8px 0 0" }}>
+              {scenario.validity || scenario.riskNote || scenario.rationale || "Conditional scenario; trigger confirmation is required."}
+            </p>
           </div>
           <div style={{ color: meta.color, background: meta.bg, borderRadius: 14, width: 44, height: 44, display: "grid", placeItems: "center", fontSize: 27, fontWeight: 950 }}>
             {meta.icon}
           </div>
         </div>
 
-        <p style={{ color: C.muted, fontSize: 12, lineHeight: 1.75, minHeight: 42 }}>
-          {scenario.rationale || scenario.riskNote || scenario.validity || "This is conditional research only. Do not enter unless the trigger is confirmed."}
-        </p>
-
         {scenario.riskNote && (
-          <div style={{ background: "#3b250666", border: "1px solid #92400e88", color: C.gold, borderRadius: 10, padding: "9px 10px", fontSize: 12, margin: "12px 0" }}>
+          <div style={{ background: "#3b250666", border: "1px solid #92400e88", color: C.gold, borderRadius: 10, padding: "9px 10px", fontSize: 12, margin: "10px 0 14px" }}>
             ⚠️ {scenario.riskNote}
           </div>
         )}
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginTop: 14 }}>
-          <MetricBox label={scenario.entryZone ? "Entry zone" : "Entry trigger"} value={entry} color={meta.color} />
-          <MetricBox label="Stop loss" value={scenario.stopLoss ? (String(scenario.stopLoss).includes("below") ? scenario.stopLoss : fmt(scenario.stopLoss)) : "required"} />
-          <MetricBox label="Activation trigger" value={trigger} color={C.gold} />
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(260px, .85fr) minmax(360px, 1.15fr)", gap: 14, alignItems: "stretch" }}>
+          <ScenarioPathMiniChart scenario={scenario} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <ScenarioFlowSteps scenario={scenario} />
+            <ScenarioValueGrid scenario={scenario} />
+            {scenario.saferEntry && (
+              <p style={{ color: C.blue, fontSize: 12, lineHeight: 1.65, margin: 0 }}>
+                Safer entry: <b>{scenario.saferEntry}</b>
+              </p>
+            )}
+          </div>
         </div>
 
-        {scenario.saferEntry && (
-          <div style={{ marginTop: 12, color: C.blue, fontSize: 12, lineHeight: 1.65 }}>
-            Safer entry: <b>{scenario.saferEntry}</b>
-          </div>
-        )}
-
-        <Targets scenario={scenario} color={meta.color} />
-        <Sources scenario={scenario} />
+        <ScenarioSources scenario={scenario} />
       </Card>
     );
   };
@@ -8384,7 +8579,7 @@ function TradeScenarioDashboardPanel() {
       <Card>
         <Title icon="🧭" title="Trade Scenario Dashboard" sub="Dynamic panel from snapshot.tradeScenarioPlan" />
         <p style={{ color: C.muted, lineHeight: 1.7 }}>
-          No tradeScenarioPlan found in the latest snapshot. Run AI Analysis / prompt builder once after v2.41.4+ so the snapshot can include deterministic trade scenarios.
+          No tradeScenarioPlan found in the latest snapshot. Run AI Analysis / prompt builder once so the snapshot can include deterministic trade scenarios.
         </p>
         <button style={{ background: C.gold, color: "#111827", border: 0, borderRadius: 10, padding: "9px 12px", fontWeight: 900 }} onClick={refresh}>Refresh snapshot</button>
       </Card>
@@ -8395,15 +8590,13 @@ function TradeScenarioDashboardPanel() {
     <div style={{ direction: "ltr", textAlign: "left" }}>
       <Card style={{ background: "#080d16", borderColor: C.border }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
-          <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <span style={{ background: `${C.gold}18`, color: C.gold, borderRadius: 12, padding: "8px 10px", fontSize: 20 }}>💎</span>
-              <div>
-                <h1 style={{ color: C.text, margin: 0, fontSize: 24 }}>GoldScope Trade Scenario Dashboard</h1>
-                <p style={{ color: C.muted, margin: "6px 0 0", fontSize: 13 }}>
-                  Dynamic Conditional Trade Scenario Plan · powered by snapshot.tradeScenarioPlan
-                </p>
-              </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ background: `${C.gold}18`, color: C.gold, borderRadius: 12, padding: "8px 10px", fontSize: 20 }}>💎</span>
+            <div>
+              <h1 style={{ color: C.text, margin: 0, fontSize: 24 }}>GoldScope Trade Scenario Dashboard</h1>
+              <p style={{ color: C.muted, margin: "6px 0 0", fontSize: 13 }}>
+                Timeline Scenario Cards · powered by snapshot.tradeScenarioPlan
+              </p>
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, background: "#050b14", border: `1px solid ${C.border}`, borderRadius: 14, padding: "10px 12px" }}>
@@ -8436,12 +8629,27 @@ function TradeScenarioDashboardPanel() {
         </div>
       </Card>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))", gap: 16 }}>
-        <ScenarioCard scenario={primary} primaryFlag />
-        {alternatives.map((scenario, idx) => (
-          <ScenarioCard key={`${scenario.name || "alt"}-${idx}`} scenario={scenario} idx={idx} />
-        ))}
-      </div>
+      <TradeScenarioHeroCard scenario={primary} />
+
+      <Card style={{ background: "#07111f", borderColor: C.border }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 14, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+          <div>
+            <h2 style={{ color: C.text, margin: 0, fontSize: 21 }}>Alternative Scenarios</h2>
+            <p style={{ color: C.muted, margin: "6px 0 0", fontSize: 12 }}>
+              Ranked by current scenario priority. No probability is assigned unless provided by the deterministic engine.
+            </p>
+          </div>
+          <span style={{ background: "#050b14", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 999, padding: "7px 10px", fontSize: 12, fontWeight: 900 }}>
+            {rankedAlternatives.length} alternatives
+          </span>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 14 }}>
+          {rankedAlternatives.map((scenario, index) => (
+            <ScenarioTimelineCard key={`${scenario.name || "alt"}-${index}`} scenario={scenario} index={index} />
+          ))}
+        </div>
+      </Card>
 
       <Card style={{ background: "#050b14", borderColor: C.border }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
@@ -8459,6 +8667,7 @@ function TradeScenarioDashboardPanel() {
     </div>
   );
 }
+
 
 
 function readProductSnapshot() {
@@ -12958,7 +13167,7 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.41.6.2.2",
+        appVersion: "GoldScope v2.41.6.3",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -16276,7 +16485,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.6.2.2",
+        appVersion: "GoldScope v2.41.6.3",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -16629,7 +16838,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.6.2.2",
+        appVersion: "GoldScope v2.41.6.3",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -16832,7 +17041,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.6.2.2",
+        appVersion: "GoldScope v2.41.6.3",
         prototypeBoundary: "Product UX shell over local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -17132,7 +17341,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.6.2.2</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.6.3</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
