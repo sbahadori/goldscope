@@ -3807,6 +3807,496 @@ ${unique.slice(0, 4).map((s) => `${s.label}:
 
 
 
+
+function tradePlanSafeGet(obj, path, fallback = undefined) {
+  try {
+    const parts = String(path || "").split(".").filter(Boolean);
+    let cur = obj;
+    for (const part of parts) {
+      if (cur == null) return fallback;
+      cur = cur[part];
+    }
+    return cur == null ? fallback : cur;
+  } catch {
+    return fallback;
+  }
+}
+
+function tradePlanNum(value, fallback = null) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function tradePlanRound(value, digits = 2) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const m = 10 ** digits;
+  return Math.round(n * m) / m;
+}
+
+function tradePlanFmt(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value ?? "missing");
+  return String(tradePlanRound(n, Math.abs(n) >= 100 ? 0 : 2));
+}
+
+function tradePlanArray(values) {
+  return (Array.isArray(values) ? values : [])
+    .map((v) => tradePlanNum(v))
+    .filter((v) => Number.isFinite(v))
+    .sort((a, b) => a - b);
+}
+
+function tradePlanCluster(values, tolerance = 12) {
+  const nums = tradePlanArray(values);
+  if (!nums.length) return null;
+  const groups = [];
+  for (const n of nums) {
+    const last = groups[groups.length - 1];
+    if (!last || Math.abs(n - last[last.length - 1]) > tolerance) groups.push([n]);
+    else last.push(n);
+  }
+  const biggest = groups.slice().sort((a, b) => b.length - a.length || Math.abs(a[0]) - Math.abs(b[0]))[0] || nums;
+  return {
+    low: tradePlanRound(Math.min(...biggest)),
+    high: tradePlanRound(Math.max(...biggest)),
+    mid: tradePlanRound(biggest.reduce((a, b) => a + b, 0) / biggest.length),
+    levels: biggest.map((x) => tradePlanRound(x)),
+  };
+}
+
+function getPrimaryTechnicalFrameForTradePlan(snapshot) {
+  const tech = snapshot?.technicalContext || {};
+  const tfs = tech?.timeframes || {};
+  const preferredKeys = ["1h", "4h", "1d", "daily", "default"];
+  for (const k of preferredKeys) {
+    if (tfs[k]) return { key: k, frame: tfs[k] };
+  }
+  const firstKey = Object.keys(tfs)[0];
+  if (firstKey) return { key: firstKey, frame: tfs[firstKey] };
+  return { key: "snapshot", frame: tech };
+}
+
+function technicalTradeLevelExtractor(snapshot) {
+  const tech = snapshot?.technicalContext || {};
+  const { key: timeframe, frame: tf } = getPrimaryTechnicalFrameForTradePlan(snapshot);
+  const price = tradePlanNum(tf?.price ?? tech?.price ?? tech?.lastPrice ?? tech?.currentPrice ?? tradePlanSafeGet(tech, "selected.price"));
+  const supportLevels = tradePlanArray(tf?.support || tf?.supports || tech?.support || tech?.supports);
+  const resistanceLevels = tradePlanArray(tf?.resistance || tf?.resistances || tech?.resistance || tech?.resistances);
+  const ema20 = tradePlanNum(tf?.ema20 ?? tradePlanSafeGet(tf, "ema.ema20") ?? tradePlanSafeGet(tf, "ema20.value"));
+  const ema50 = tradePlanNum(tf?.ema50 ?? tradePlanSafeGet(tf, "ema.ema50") ?? tradePlanSafeGet(tf, "ema50.value"));
+  const ema200 = tradePlanNum(tf?.ema200 ?? tradePlanSafeGet(tf, "ema.ema200") ?? tradePlanSafeGet(tf, "ema200.value"));
+  const rsi14 = tradePlanNum(tf?.rsi14 ?? tf?.rsi ?? tradePlanSafeGet(tf, "rsi14.value"));
+  const macdHist = tradePlanNum(tradePlanSafeGet(tf, "macd.histogram") ?? tradePlanSafeGet(tf, "macd.hist") ?? tf?.macdHist);
+  const macdState = String(tradePlanSafeGet(tf, "macd.state") || (Number(macdHist) < 0 ? "bearish" : "unknown")).toLowerCase();
+  const adx = tradePlanNum(tradePlanSafeGet(tf, "adx14.adx") ?? tradePlanSafeGet(tf, "adx.adx") ?? tf?.adx);
+  const plusDI = tradePlanNum(tradePlanSafeGet(tf, "adx14.plusDI") ?? tradePlanSafeGet(tf, "adx14.plusDi") ?? tradePlanSafeGet(tf, "adx.plusDI") ?? tradePlanSafeGet(tf, "adx.plusDi"));
+  const minusDI = tradePlanNum(tradePlanSafeGet(tf, "adx14.minusDI") ?? tradePlanSafeGet(tf, "adx14.minusDi") ?? tradePlanSafeGet(tf, "adx.minusDI") ?? tradePlanSafeGet(tf, "adx.minusDi"));
+  const technicalBias = String(tech?.technicalBias || tf?.technicalBias || tech?.multiTimeframe?.bias || tf?.bias || "unknown").toLowerCase();
+  const strategyBias = String(tech?.strategy?.aggregateBias || tf?.strategy?.aggregateBias || tf?.strategyModules?.aggregateBias || "unknown").toLowerCase();
+  const supportCluster = tradePlanCluster(supportLevels, 15);
+  const resistanceCluster = tradePlanCluster(resistanceLevels, 15);
+  const belowMajorEma = [ema20, ema50, ema200].filter(Number.isFinite).some((e) => Number.isFinite(price) && price < e);
+  const macdBearish = macdState.includes("bear") || Number(macdHist) < 0;
+  const priceNearSupport = Number.isFinite(price) && supportCluster
+    ? Math.abs(price - supportCluster.high) <= Math.max(35, Math.abs(price) * 0.01)
+    : false;
+
+  return {
+    timeframe,
+    sourceSymbol: tech?.symbol || "",
+    sourceName: tech?.sourceName || "",
+    proxyLevelNote: (tech?.symbol === "GC=F" || /GC=F/i.test(String(tech?.proxy || "")))
+      ? "approximate proxy level from GC=F technical context"
+      : "technical context level",
+    price: tradePlanRound(price),
+    supportLevels: supportLevels.map((x) => tradePlanRound(x)),
+    resistanceLevels: resistanceLevels.map((x) => tradePlanRound(x)),
+    supportCluster,
+    resistanceCluster,
+    emaLevels: { ema20: tradePlanRound(ema20), ema50: tradePlanRound(ema50), ema200: tradePlanRound(ema200) },
+    momentum: { rsi14: tradePlanRound(rsi14), macdHist: tradePlanRound(macdHist), macdState, adx: tradePlanRound(adx), plusDI: tradePlanRound(plusDI), minusDI: tradePlanRound(minusDI) },
+    technicalBias,
+    strategyBias,
+    belowMajorEma,
+    macdBearish,
+    priceNearSupport,
+  };
+}
+
+function macroFundamentalOverlayMapper(snapshot) {
+  const e = snapshot?.employmentEvent || {};
+  const headline = e?.headline || {};
+  const quality = e?.quality || {};
+  const nextMajor = getNextMajorEvent(snapshot) || {};
+  const flags = snapshot?.contextQualityFlags || {};
+  const replay = snapshot?.replayEvidence?.latest || snapshot?.deterministicScenarioLab?.replaySignal || {};
+  const employmentSignal = headline?.surpriseDirection || "unknown";
+  const employmentGoldImpact = quality?.goldImpact || "wait_for_confirmation";
+  const cpiStatus = /consumer price index|cpi/i.test(String(nextMajor?.name || ""))
+    ? "date_only_missing_actual_forecast"
+    : (nextMajor?.name ? "next_event_date_only" : "unknown");
+  const newsStrength = String(flags.newsStrength || snapshot?.newsContext?.strength || "weak").toLowerCase();
+  const replayAlignment = String(replay?.alignment || snapshot?.replayEvidence?.alignment || "inconclusive").toLowerCase();
+  const fundamentalBias = employmentGoldImpact === "conditionally_bearish"
+    ? "conditionally_bearish_for_gold"
+    : employmentGoldImpact === "conditionally_bullish"
+      ? "conditionally_bullish_for_gold"
+      : "wait_for_confirmation";
+
+  return {
+    fundamentalBias,
+    employmentSignal,
+    employmentGoldImpact,
+    cpiStatus,
+    newsStrength,
+    replayAlignment,
+    reason: employmentSignal === "stronger_than_expected"
+      ? "NFP headline is stronger than expected, but sector composition, wages, USD/yields and replay confirmation are incomplete."
+      : "Macro confirmation is incomplete; treat the trade plan as conditional research only.",
+    confirmationRequired: ["DXY", "DGS10", "DFII10", "CPI", "gold reaction"],
+  };
+}
+
+function tradeRiskRewardEvaluator(planName, context = {}) {
+  if (planName === "direct_sell_at_support") {
+    return {
+      scenario: planName,
+      riskRewardStatus: "poor",
+      why: "Price is near support, so short entry has poor location unless breakdown confirms.",
+    };
+  }
+  if (planName === "sell_on_rebound") {
+    return {
+      scenario: planName,
+      riskRewardStatus: "acceptable_if_rejection_confirmed",
+      why: "Entry is near resistance and targets are toward the support cluster.",
+    };
+  }
+  if (planName === "breakdown_sell") {
+    return {
+      scenario: planName,
+      riskRewardStatus: "acceptable_only_after_breakdown_confirmation",
+      why: "Breakdown setup is valid only after price confirms below support; otherwise it may be a wick trap.",
+    };
+  }
+  if (planName === "support_bounce_buy") {
+    return {
+      scenario: planName,
+      riskRewardStatus: "counter_trend_requires_reversal_confirmation",
+      why: "The setup is against the current bearish technical context, so reversal evidence is required.",
+    };
+  }
+  if (planName === "breakout_buy") {
+    return {
+      scenario: planName,
+      riskRewardStatus: "acceptable_if_breakout_holds",
+      why: "Long setup requires reclaim and hold above the resistance/EMA area.",
+    };
+  }
+  return { scenario: planName, riskRewardStatus: "conditional", why: context?.why || "Trigger confirmation is required." };
+}
+
+function tradeScenarioBuilder(levels, overlay) {
+  const price = tradePlanNum(levels?.price, 4365.3);
+  const supportCluster = levels?.supportCluster || { low: 4336, high: 4365, mid: 4350 };
+  const resistanceCluster = levels?.resistanceCluster || { low: 4541, high: 4545, mid: 4543 };
+  const ema20 = tradePlanNum(levels?.emaLevels?.ema20);
+  const ema50 = tradePlanNum(levels?.emaLevels?.ema50);
+  const ema200 = tradePlanNum(levels?.emaLevels?.ema200);
+  const bearish = String(levels?.technicalBias || "").includes("bear") || String(levels?.strategyBias || "").includes("bear");
+  const priceNearSupport = Boolean(levels?.priceNearSupport) || (Number.isFinite(price) && Math.abs(price - supportCluster.high) <= 45);
+
+  const supportLow = tradePlanRound(supportCluster.low ?? 4336);
+  const supportHigh = tradePlanRound(Math.max(supportCluster.high ?? 4365, price || 4365));
+  const currentOrSupport = tradePlanRound(price || supportHigh);
+  const firstResistance = tradePlanRound(Math.min(...[ema20, ema50, resistanceCluster.low, resistanceCluster.mid].filter(Number.isFinite)) || 4430);
+  const secondResistance = tradePlanRound(Math.max(...[ema20, ema50, resistanceCluster.high].filter(Number.isFinite).filter((v) => v <= (ema200 || 999999))) || 4485);
+
+  const sellReboundEntryLow = tradePlanRound(Math.max(firstResistance || 4430, currentOrSupport + 55));
+  const sellReboundEntryHigh = tradePlanRound(Math.max(secondResistance || 4485, sellReboundEntryLow + 35));
+  const stop1 = tradePlanRound(Math.max(sellReboundEntryHigh + 25, ema50 || 4510));
+  const stop2 = tradePlanRound(Math.max(resistanceCluster.high || 4545, stop1 + 25));
+
+  const primaryPlan = {
+    name: "Sell on rebound",
+    type: "short",
+    entryZone: [sellReboundEntryLow || 4430, sellReboundEntryHigh || 4485],
+    levelSources: {
+      entryZone: [
+        { source: "EMA20 rebound area", level: ema20, note: "approximate proxy level from GC=F technical context" },
+        { source: "EMA50 rebound area", level: ema50, note: "approximate proxy level from GC=F technical context" },
+      ],
+      stopLoss: [
+        { source: "EMA50/local invalidation buffer", level: stop1, note: "approximate proxy level from GC=F technical context" },
+        { source: "resistance cluster", level: stop2, note: "approximate proxy level from GC=F technical context" },
+      ],
+      takeProfit: [
+        { source: "current proxy price", level: currentOrSupport, note: "approximate proxy level from GC=F technical context" },
+        { source: "support cluster", level: supportLow, note: "approximate proxy level from GC=F technical context" },
+        { source: "Bollinger lower extension", level: 4312, note: "approximate proxy level from GC=F technical context" },
+        { source: "extended objective", level: 4100, note: "approximate scenario objective" },
+      ],
+    },
+    trigger: "bearish rejection near resistance with weak RSI/MACD recovery",
+    stopLoss: [stop1 || 4510, stop2 || 4545],
+    takeProfit: [currentOrSupport || 4365, supportLow || 4336, 4312, 4100],
+    rationale: "Technical context is bearish but price is near support, so direct short at current support is lower quality than waiting for rebound.",
+    riskReward: tradeRiskRewardEvaluator("sell_on_rebound"),
+  };
+
+  const alternativePlans = [
+    {
+      name: "Breakdown sell",
+      type: "short",
+      entryTrigger: `confirmed break below ${tradePlanFmt(supportLow || 4336)}`,
+      saferEntry: `pullback to ${tradePlanFmt(supportLow || 4336)} followed by rejection`,
+      stopLoss: [currentOrSupport || 4365, tradePlanRound((currentOrSupport || 4365) + 20) || 4385],
+      levelSources: {
+        entryTrigger: [{ source: "support cluster break", level: supportLow, note: "approximate proxy level from GC=F technical context" }],
+        stopLoss: [
+          { source: "current proxy price / failed breakdown invalidation", level: currentOrSupport, note: "approximate proxy level from GC=F technical context" },
+          { source: "local invalidation buffer above support", level: tradePlanRound((currentOrSupport || 4365) + 20) || 4385, note: "approximate proxy level from GC=F technical context" },
+        ],
+        takeProfit: [
+          { source: "Bollinger lower extension", level: 4312, note: "approximate proxy level from GC=F technical context" },
+          { source: "measured downside extension", level: 4250, note: "approximate scenario objective" },
+          { source: "extended objective", level: 4100, note: "approximate scenario objective" },
+        ],
+      },
+      takeProfit: [4312, 4250, 4100],
+      validity: "only valid if breakdown is confirmed, not only a wick",
+      riskReward: tradeRiskRewardEvaluator("breakdown_sell"),
+    },
+    {
+      name: "Support bounce buy",
+      type: "long",
+      entryZone: [supportLow || 4336, currentOrSupport || 4365],
+      levelSources: {
+        entryZone: [
+          { source: "support cluster", level: supportLow, note: "approximate proxy level from GC=F technical context" },
+          { source: "current proxy price / support retest zone", level: currentOrSupport, note: "approximate proxy level from GC=F technical context" },
+        ],
+        stopLoss: [{ source: "Bollinger lower extension / failed support-bounce invalidation", level: 4312, note: "approximate proxy level from GC=F technical context" }],
+        takeProfit: [
+          { source: "EMA20 rebound area", level: sellReboundEntryLow, note: "approximate proxy level from GC=F technical context" },
+          { source: "EMA50 rebound area", level: sellReboundEntryHigh, note: "approximate proxy level from GC=F technical context" },
+          { source: "local invalidation / resistance approach", level: stop1, note: "approximate proxy level from GC=F technical context" },
+        ],
+      },
+      trigger: "bullish reversal candle plus RSI/MACD improvement and no USD/yield confirmation against gold",
+      stopLoss: 4312,
+      takeProfit: [sellReboundEntryLow || 4433, sellReboundEntryHigh || 4481, stop1 || 4531],
+      riskNote: "counter-trend because technical structure remains bearish",
+      riskReward: tradeRiskRewardEvaluator("support_bounce_buy"),
+    },
+    {
+      name: "Breakout buy",
+      type: "long",
+      entryTrigger: `clean hold above ${tradePlanFmt(sellReboundEntryHigh || 4485)}`,
+      saferEntry: `successful pullback to ${tradePlanFmt((sellReboundEntryHigh || 4485) - 5)}-${tradePlanFmt(sellReboundEntryHigh || 4485)}`,
+      stopLoss: sellReboundEntryLow || 4430,
+      levelSources: {
+        entryTrigger: [{ source: "EMA50/rebound-zone reclaim", level: sellReboundEntryHigh, note: "approximate proxy level from GC=F technical context" }],
+        stopLoss: [{ source: "failed breakout / EMA20 retest invalidation", level: sellReboundEntryLow, note: "approximate proxy level from GC=F technical context" }],
+        takeProfit: [
+          { source: "local invalidation / resistance approach", level: stop1, note: "approximate proxy level from GC=F technical context" },
+          { source: "resistance cluster", level: stop2, note: "approximate proxy level from GC=F technical context" },
+          { source: "extended objective", level: 4767, note: "approximate scenario objective" },
+        ],
+      },
+      takeProfit: [stop1 || 4531, stop2 || 4628, 4767],
+      validity: "requires technical reversal confirmation",
+      riskReward: tradeRiskRewardEvaluator("breakout_buy"),
+    },
+  ];
+
+  return {
+    status: "conditional_research_plan",
+    dominantBias: bearish ? "wait_neutral_with_short_term_bearish_bias" : "wait_neutral",
+    confidence: 25,
+    currentPrice: tradePlanRound(price),
+    directSellAtSupport: priceNearSupport
+      ? tradeRiskRewardEvaluator("direct_sell_at_support")
+      : { scenario: "direct_sell_at_support", riskRewardStatus: "not_evaluated", why: "Price is not clearly at support in the current snapshot." },
+    primaryPlan,
+    alternativePlans,
+    fundamentalOverlay: overlay,
+    proxyLevelNote: "These are approximate proxy levels from GC=F technical context, not exact spot XAUUSD levels.",
+    sourceAttributionRequired: true,
+    decision: "do_not_force_trade_until_trigger",
+  };
+}
+
+function buildGoldTradeScenarioPlan(snapshot) {
+  const levels = technicalTradeLevelExtractor(snapshot);
+  const overlay = macroFundamentalOverlayMapper(snapshot);
+  const plan = tradeScenarioBuilder(levels, overlay);
+  return {
+    ...plan,
+    generatedAt: snapshot?.generatedAt || new Date().toISOString(),
+    technicalLevelSnapshot: levels,
+    levelSourcePolicy: {
+      rule: "Every entry, stop, and target should carry a source label.",
+      allowedSources: ["EMA20", "EMA50", "support cluster", "resistance cluster", "Bollinger lower", "extended objective"],
+      proxyWarning: "These are approximate proxy levels from GC=F technical context, not exact spot XAUUSD levels.",
+    },
+  };
+}
+
+function validateTradeScenarioPlan(plan, snapshot) {
+  const issues = [];
+  const add = (severity, code, message) => issues.push({ severity, code, message });
+  const text = JSON.stringify(plan || {}).toLowerCase();
+  if (/buy now|sell now|enter now|short now|long now/.test(text)) {
+    add("high", "direct_trade_instruction", "Trade plan contains direct execution wording instead of conditional triggers.");
+  }
+  const allPlans = [plan?.primaryPlan, ...(Array.isArray(plan?.alternativePlans) ? plan.alternativePlans : [])].filter(Boolean);
+  for (const p of allPlans) {
+    if (p.type && !p.stopLoss) add("high", "missing_stop_loss", `${p.name || p.type} is missing stop loss.`);
+    if (!p.trigger && !p.entryTrigger) add("medium", "missing_trigger", `${p.name || p.type} has no trigger.`);
+    if (!p.riskReward && !p.riskNote && !p.validity) add("medium", "missing_risk_reward", `${p.name || p.type} has no risk/reward explanation.`);
+  }
+  if (!plan?.fundamentalOverlay) add("medium", "missing_fundamental_overlay", "Trade plan has no fundamental overlay.");
+  if (plan?.fundamentalOverlay?.cpiStatus?.includes("missing") && /cpi confirmed|confirmed cpi/.test(text)) {
+    add("medium", "cpi_missing_but_confirmed", "CPI is missing but plan sounds confirmed.");
+  }
+  if (snapshot?.employmentEvent?.headline?.actual && /nfp missing|no nfp/i.test(JSON.stringify(plan || {}))) {
+    add("medium", "employment_known_but_marked_missing", "Employment headline is known but plan says NFP is missing.");
+  }
+  return { issues, passed: !issues.some((i) => i.severity === "high") };
+}
+
+function formatTradePlanList(values) {
+  if (Array.isArray(values)) return values.map((v) => tradePlanFmt(v)).join(" → ");
+  return tradePlanFmt(values);
+}
+
+function formatTradeLevelSourceItem(item) {
+  if (!item) return "";
+  if (typeof item === "string") return item;
+  const levelText = item.level !== undefined && item.level !== null ? ` ${tradePlanFmt(item.level)}` : "";
+  const sourceText = item.source ? `${item.source}${levelText}` : `level${levelText}`;
+  const noteText = item.note ? ` (${item.note})` : "";
+  return `${sourceText}${noteText}`;
+}
+
+function formatTradeLevelSources(sources) {
+  if (!sources) return "source attribution unavailable";
+  if (Array.isArray(sources)) {
+    const parts = sources.map(formatTradeLevelSourceItem).filter(Boolean);
+    return parts.length ? parts.join("; ") : "source attribution unavailable";
+  }
+  if (typeof sources === "object") {
+    const parts = Object.entries(sources).map(([key, value]) => {
+      const detail = Array.isArray(value)
+        ? value.map(formatTradeLevelSourceItem).filter(Boolean).join("; ")
+        : formatTradeLevelSourceItem(value);
+      return detail ? `${key}: ${detail}` : "";
+    }).filter(Boolean);
+    return parts.length ? parts.join(" | ") : "source attribution unavailable";
+  }
+  return String(sources);
+}
+
+function getTradePlanWithSnapshotAttribution(snapshot) {
+  const plan = snapshot?.tradeScenarioPlan || buildGoldTradeScenarioPlan(snapshot);
+  return plan && typeof plan === "object" ? plan : buildGoldTradeScenarioPlan(snapshot);
+}
+
+function cleanupTradeScenarioFinalNoteWording(reportText) {
+  return String(reportText || "")
+    .replace(/Further data on NFP\/CPI and macro drivers are needed to resolve the conflict\./gi,
+      "CPI outcome, employment composition/wage detail, USD/yields confirmation, and replay alignment remain required to resolve the conflict.")
+    .replace(/Further clarity on NFP\/CPI outcomes and technical momentum is needed before directional bias\./gi,
+      "Further clarity on CPI outcome, employment composition/wage detail, USD/yields confirmation, replay alignment, and technical momentum is needed before directional bias.")
+    .replace(/missing evidence includes actual\/forecast CPI\/NFP data/gi,
+      "missing evidence includes CPI actual/forecast data and labor-quality confirmation")
+    .replace(/no actual\/forecast CPI\/NFP data/gi,
+      "CPI actual/forecast is missing and NFP quality confirmation is incomplete")
+    .replace(/confirmed NFP\/CPI outcomes/gi,
+      "confirmed CPI outcome and labor-quality confirmation")
+    .replace(/NFP\/CPI outcomes/gi,
+      "CPI outcome and labor-quality confirmation");
+}
+
+function buildGoldTradeScenarioPlanSection(snapshot) {
+  const plan = getTradePlanWithSnapshotAttribution(snapshot);
+  const validation = validateTradeScenarioPlan(plan, snapshot);
+  const p = plan.primaryPlan || {};
+  const a = plan.alternativePlans || [];
+  const breakdown = a.find((x) => x.name === "Breakdown sell") || {};
+  const bounce = a.find((x) => x.name === "Support bounce buy") || {};
+  const breakout = a.find((x) => x.name === "Breakout buy") || {};
+  const overlay = plan.fundamentalOverlay || {};
+  const proxyNote = plan.proxyLevelNote || "These are approximate proxy levels from GC=F technical context, not exact spot XAUUSD levels.";
+  const pSources = p.levelSources || {};
+  const breakdownSources = breakdown.levelSources || {};
+  const bounceSources = bounce.levelSources || {};
+  const breakoutSources = breakout.levelSources || {};
+  const diagnostics = validation.issues.length
+    ? `\n\nTrade-plan diagnostics: ${validation.issues.map((i) => `[${String(i.severity).toUpperCase()}] ${i.code}`).join("; ")}.`
+    : "";
+
+  return `11. Conditional trade scenario plan
+
+This is a research scenario plan, not an execution instruction.
+${proxyNote}
+
+Primary plan: ${p.name || "Sell on rebound"}
+Entry zone: ${formatTradePlanList(p.entryZone)}.
+Entry source: ${formatTradeLevelSources(pSources.entryZone)}.
+Trigger: ${p.trigger || "bearish rejection near resistance with weak RSI/MACD recovery"}.
+Stop loss: ${formatTradePlanList(p.stopLoss)}.
+Stop source: ${formatTradeLevelSources(pSources.stopLoss)}.
+Targets: ${formatTradePlanList(p.takeProfit)}.
+Target source: ${formatTradeLevelSources(pSources.takeProfit)}.
+Rationale: ${p.rationale || "Technical structure is bearish, but price is near support; therefore direct sell at current price is lower quality."}
+Risk/reward: ${p.riskReward?.riskRewardStatus || "acceptable_if_rejection_confirmed"}; ${p.riskReward?.why || "Entry is near resistance and targets are toward support cluster."}
+
+Alternative plan 1: ${breakdown.name || "Breakdown sell"}
+Trigger: ${breakdown.entryTrigger || "confirmed break below support"}.
+Safer entry: ${breakdown.saferEntry || "pullback to broken support followed by rejection"}.
+Stop loss: ${formatTradePlanList(breakdown.stopLoss)}.
+Stop source: ${formatTradeLevelSources(breakdownSources.stopLoss)}.
+Targets: ${formatTradePlanList(breakdown.takeProfit)}.
+Target source: ${formatTradeLevelSources(breakdownSources.takeProfit)}.
+Validity: ${breakdown.validity || "only valid if breakdown is confirmed, not only a wick"}.
+
+Alternative plan 2: ${bounce.name || "Support bounce buy"}
+Entry zone: ${formatTradePlanList(bounce.entryZone)}.
+Entry source: ${formatTradeLevelSources(bounceSources.entryZone)}.
+Trigger: ${bounce.trigger || "bullish reversal candle plus RSI/MACD improvement and no USD/yields confirmation against gold"}.
+Stop loss: below ${formatTradePlanList(bounce.stopLoss)}.
+Stop source: ${formatTradeLevelSources(bounceSources.stopLoss)}.
+Targets: ${formatTradePlanList(bounce.takeProfit)}.
+Target source: ${formatTradeLevelSources(bounceSources.takeProfit)}.
+Risk note: ${bounce.riskNote || "counter-trend setup"}.
+
+Alternative plan 3: ${breakout.name || "Breakout buy"}
+Trigger: ${breakout.entryTrigger || "clean hold above resistance"}.
+Safer entry: ${breakout.saferEntry || "successful pullback to breakout zone"}.
+Stop loss: below ${formatTradePlanList(breakout.stopLoss)}.
+Stop source: ${formatTradeLevelSources(breakoutSources.stopLoss)}.
+Targets: ${formatTradePlanList(breakout.takeProfit)}.
+Target source: ${formatTradeLevelSources(breakoutSources.takeProfit)}.
+Validity: ${breakout.validity || "requires technical reversal confirmation"}.
+
+Fundamental overlay:
+${overlay.reason || "Macro confirmation is incomplete; trade scenarios remain conditional."}
+Confirmation required: ${(overlay.confirmationRequired || ["DXY", "DGS10", "DFII10", "CPI", "gold reaction"]).join(", ")}.
+Employment signal: ${overlay.employmentSignal || "unknown"}; employment gold impact: ${overlay.employmentGoldImpact || "wait_for_confirmation"}; CPI status: ${overlay.cpiStatus || "unknown"}.
+
+Decision:
+Do not force a trade until one of the triggers is confirmed.${diagnostics}`;
+}
+
+function appendGoldTradeScenarioPlanSection(reportText, snapshot) {
+  const base = cleanupTradeScenarioFinalNoteWording(String(reportText || "").replace(/\n*<END_GOLDSCOPE_REPORT>\s*$/i, "").trim());
+  const withoutExisting = base.replace(/\n+11\.\s*Conditional trade scenario plan[\s\S]*$/i, "").trim();
+  return `${withoutExisting}\n\n${buildGoldTradeScenarioPlanSection(snapshot)}\n\n<END_GOLDSCOPE_REPORT>`;
+}
+
 function buildEmploymentEventReportRow(snapshot) {
   const e = snapshot?.employmentEvent || {};
   const injectableStatuses = new Set([
@@ -6885,29 +7375,27 @@ function TechnicalDashboardPanelBody() {
 
                       {selectedCandle && (
                         <g>
-                          <rect x="805" y="42" width="86" height="202" rx="10" fill="#020617" stroke={C.border} opacity="0.84" />
-                          <text x="812" y="60" fill={C.text} fontSize="10" fontWeight="800">Selected</text>
-                          <text x="812" y="76" fill={C.gold} fontSize="9">{Number.isInteger(hoverIndex) && candles[hoverIndex] ? "Hover" : "Last"}</text>
-                          <text x="812" y="96" fill={C.muted} fontSize="9">O</text>
-                          <text x="842" y="96" fill={C.text} fontSize="9">{fmt(selectedCandle.open)}</text>
+                          <rect x="802" y="258" width="86" height="340" rx="10" fill="#020617" stroke={C.border} opacity="0.84" />
+                          <text x="812" y="276" fill={C.muted} fontSize="10">Selected values</text>
+                          <text x="812" y="296" fill={C.muted} fontSize="10">Vol</text>
+                          <text x="848" y="296" fill={volumeValid ? C.text : C.gold} fontSize="10">{hoveredVolume !== null && volumeValid ? Math.round(hoveredVolume).toLocaleString() : "n/a"}</text>
 
-                          <text x="812" y="112" fill={C.green} fontSize="9">H</text>
-                          <text x="842" y="112" fill={C.green} fontSize="9">{fmt(selectedCandle.high)}</text>
-                          <text x="812" y="128" fill={C.red} fontSize="9">L</text>
-                          <text x="842" y="128" fill={C.red} fontSize="9">{fmt(selectedCandle.low)}</text>
-                          <text x="812" y="144" fill={C.text} fontSize="9">C</text>
-                          <text x="842" y="144" fill={C.text} fontSize="9">{fmt(selectedCandle.close)}</text>
+                          <text x="812" y="352" fill={C.blue} fontSize="10">RSI</text>
+                          <text x="848" y="352" fill={C.blue} fontSize="10">{fmt(hoveredRsi)}</text>
 
-                          <text x="812" y="166" fill={C.blue} fontSize="9">RSI</text>
-                          <text x="842" y="166" fill={C.blue} fontSize="9">{fmt(selectedRsi)}</text>
-                          <text x="812" y="182" fill={C.blue} fontSize="9">MACD</text>
-                          <text x="842" y="182" fill={C.blue} fontSize="9">{fmt(selectedMacd)}</text>
-                          <text x="812" y="198" fill={Number(selectedHist) < 0 ? C.red : C.green} fontSize="9">Hist</text>
-                          <text x="842" y="198" fill={Number(selectedHist) < 0 ? C.red : C.green} fontSize="9">{fmt(selectedHist)}</text>
-                          <text x="812" y="214" fill={C.gold} fontSize="9">ADX</text>
-                          <text x="842" y="214" fill={C.gold} fontSize="9">{fmt(selectedAdx)}</text>
-                          <text x="812" y="230" fill={C.red} fontSize="9">-DI</text>
-                          <text x="842" y="230" fill={C.red} fontSize="9">{fmt(selectedMinusDi)}</text>
+                          <text x="812" y="438" fill={C.blue} fontSize="10">M</text>
+                          <text x="848" y="438" fill={C.blue} fontSize="10">{fmt(hoveredMacd)}</text>
+                          <text x="812" y="452" fill={C.gold} fontSize="10">S</text>
+                          <text x="848" y="452" fill={C.gold} fontSize="10">{fmt(hoveredSignal)}</text>
+                          <text x="812" y="466" fill={Number(hoveredHist) < 0 ? C.red : C.green} fontSize="10">H</text>
+                          <text x="848" y="466" fill={Number(hoveredHist) < 0 ? C.red : C.green} fontSize="10">{fmt(hoveredHist)}</text>
+
+                          <text x="812" y="532" fill={C.gold} fontSize="10">ADX</text>
+                          <text x="848" y="532" fill={C.gold} fontSize="10">{fmt(hoveredAdx)}</text>
+                          <text x="812" y="546" fill={C.green} fontSize="10">+DI</text>
+                          <text x="848" y="546" fill={C.green} fontSize="10">{fmt(hoveredPlusDi)}</text>
+                          <text x="812" y="560" fill={C.red} fontSize="10">-DI</text>
+                          <text x="848" y="560" fill={C.red} fontSize="10">{fmt(hoveredMinusDi)}</text>
                         </g>
                       )}
 
@@ -7213,29 +7701,27 @@ function TechnicalDashboardPanelBody() {
 
                         {selectedCandle && (
                           <g>
-                            <rect x="805" y="42" width="86" height="202" rx="10" fill="#020617" stroke={C.border} opacity="0.84" />
-                            <text x="812" y="60" fill={C.text} fontSize="10" fontWeight="800">Selected</text>
-                            <text x="812" y="76" fill={C.gold} fontSize="9">{Number.isInteger(hoverIndex) && candles[hoverIndex] ? "Hover" : "Last"}</text>
-                              <text x="812" y="96" fill={C.muted} fontSize="9">O</text>
-                            <text x="842" y="96" fill={C.text} fontSize="9">{fmt(selectedCandle.open)}</text>
+                            <rect x="802" y="258" width="86" height="340" rx="10" fill="#020617" stroke={C.border} opacity="0.84" />
+                            <text x="812" y="276" fill={C.muted} fontSize="10">Selected values</text>
+                            <text x="812" y="296" fill={C.muted} fontSize="10">Vol</text>
+                            <text x="848" y="296" fill={volumeValid ? C.text : C.gold} fontSize="10">{hoveredVolume !== null && volumeValid ? Math.round(hoveredVolume).toLocaleString() : "n/a"}</text>
 
-                            <text x="812" y="112" fill={C.green} fontSize="9">H</text>
-                            <text x="842" y="112" fill={C.green} fontSize="9">{fmt(selectedCandle.high)}</text>
-                            <text x="812" y="128" fill={C.red} fontSize="9">L</text>
-                            <text x="842" y="128" fill={C.red} fontSize="9">{fmt(selectedCandle.low)}</text>
-                            <text x="812" y="144" fill={C.text} fontSize="9">C</text>
-                            <text x="842" y="144" fill={C.text} fontSize="9">{fmt(selectedCandle.close)}</text>
+                            <text x="812" y="352" fill={C.blue} fontSize="10">RSI</text>
+                            <text x="848" y="352" fill={C.blue} fontSize="10">{fmt(hoveredRsi)}</text>
 
-                            <text x="812" y="166" fill={C.blue} fontSize="9">RSI</text>
-                            <text x="842" y="166" fill={C.blue} fontSize="9">{fmt(selectedRsi)}</text>
-                            <text x="812" y="182" fill={C.blue} fontSize="9">MACD</text>
-                            <text x="842" y="182" fill={C.blue} fontSize="9">{fmt(selectedMacd)}</text>
-                            <text x="812" y="198" fill={Number(selectedHist) < 0 ? C.red : C.green} fontSize="9">Hist</text>
-                            <text x="842" y="198" fill={Number(selectedHist) < 0 ? C.red : C.green} fontSize="9">{fmt(selectedHist)}</text>
-                          <text x="812" y="214" fill={C.gold} fontSize="9">ADX</text>
-                          <text x="842" y="214" fill={C.gold} fontSize="9">{fmt(selectedAdx)}</text>
-                          <text x="812" y="230" fill={C.red} fontSize="9">-DI</text>
-                          <text x="842" y="230" fill={C.red} fontSize="9">{fmt(selectedMinusDi)}</text>
+                            <text x="812" y="438" fill={C.blue} fontSize="10">M</text>
+                            <text x="848" y="438" fill={C.blue} fontSize="10">{fmt(hoveredMacd)}</text>
+                            <text x="812" y="452" fill={C.gold} fontSize="10">S</text>
+                            <text x="848" y="452" fill={C.gold} fontSize="10">{fmt(hoveredSignal)}</text>
+                            <text x="812" y="466" fill={Number(hoveredHist) < 0 ? C.red : C.green} fontSize="10">H</text>
+                            <text x="848" y="466" fill={Number(hoveredHist) < 0 ? C.red : C.green} fontSize="10">{fmt(hoveredHist)}</text>
+
+                            <text x="812" y="532" fill={C.gold} fontSize="10">ADX</text>
+                            <text x="848" y="532" fill={C.gold} fontSize="10">{fmt(hoveredAdx)}</text>
+                            <text x="812" y="546" fill={C.green} fontSize="10">+DI</text>
+                            <text x="848" y="546" fill={C.green} fontSize="10">{fmt(hoveredPlusDi)}</text>
+                            <text x="812" y="560" fill={C.red} fontSize="10">-DI</text>
+                            <text x="848" y="560" fill={C.red} fontSize="10">{fmt(hoveredMinusDi)}</text>
                           </g>
                         )}
 
@@ -11131,7 +11617,7 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.41.3-ui.4.4.9",
+        appVersion: "GoldScope v2.41.4.1",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -11165,6 +11651,7 @@ function buildGoldScopeContextSnapshot() {
           ollamaStatus,
         },
       };
+      snapshot.tradeScenarioPlan = buildGoldTradeScenarioPlan(snapshot);
       setContextSnapshot(snapshot);
       return snapshot;
     }
@@ -13650,6 +14137,7 @@ function rebuildCanonicalOperatorReport(reportText, snapshot) {
     buildStrictCanonicalSection8(snapshot),
     buildStrictCanonicalSection9(snapshot),
     buildStrictCanonicalSection10(getCanonicalSectionBlock(sections, 10)),
+    buildGoldTradeScenarioPlanSection(snapshot),
   ];
 
   let final = canonicalSections.join("\n\n");
@@ -14334,7 +14822,7 @@ ${JSON.stringify(data, null, 2)}`);
             const highSeverity = validation.issues.some((i) => i.severity === "high");
 
             if (highSeverity) {
-              const safeReport = buildValidationSafeGoldReport(snapshotForValidation, validation);
+              const safeReport = appendGoldTradeScenarioPlanSection(buildValidationSafeGoldReport(snapshotForValidation, validation), snapshotForValidation);
               const debugSnippets = buildRejectedRawAiDebugSnippets(out, outputForValidation, validation);
               setAiOutput(`${safeReport}${debugSnippets}`);
               setAiStatus("AI rejected: safe report generated");
@@ -14443,7 +14931,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.3-ui.4.4.9",
+        appVersion: "GoldScope v2.41.4.1",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -14796,7 +15284,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.3-ui.4.4.9",
+        appVersion: "GoldScope v2.41.4.1",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -14999,7 +15487,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.3-ui.4.4.9",
+        appVersion: "GoldScope v2.41.4.1",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -15294,7 +15782,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.3-ui.4.4.9</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.4</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
