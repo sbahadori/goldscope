@@ -8635,7 +8635,7 @@ function ProductSummaryCards() {
   );
 }
 
-function ProductDashboardPage() {
+function ProductDashboardPage({ onNavigate, onRefreshMacroNews }) {
   const [range, setRange] = useState("1M");
   const summary = getProductMarketSummary();
 
@@ -8646,9 +8646,9 @@ function ProductDashboardPage() {
         subtitle="Market status, key summary cards, price chart, and secondary insights."
         actions={
           <>
-            <button style={btn(false)} onClick={() => { refreshFred(); refreshGdelt(); }}>Refresh macro/news</button>
-            <button style={btn(false)} onClick={() => setActive("analytics")}>Open Analytics</button>
-            <button style={btn(false)} onClick={() => setActive("aiEngine")}>Open AI Analysis</button>
+            <button style={btn(false)} onClick={() => onRefreshMacroNews?.()}>Refresh macro/news</button>
+            <button style={btn(false)} onClick={() => onNavigate?.("analytics")}>Open Analytics</button>
+            <button style={btn(false)} onClick={() => onNavigate?.("aiEngine")}>Open AI Analysis</button>
           </>
         }
       />
@@ -12768,15 +12768,39 @@ function buildEventForecastsForFundamental(calendarRisk, employmentEvent) {
   };
 }
 
-function normalizeReplayForFundamental(replayCompact = []) {
-  const rows = Array.isArray(replayCompact) ? replayCompact : [];
-  const latest = rows[0] || {};
-  const alignment = latest?.alignment || latest?.reactionAlignment || (rows.length ? "inconclusive" : "missing");
+function normalizeReplayForFundamental(replayCompact = [], snapshotDraft = {}, scenario = {}) {
+  const compactRows = Array.isArray(replayCompact) ? replayCompact : [];
+  const snapshotReplay = snapshotDraft?.replayEvidence || {};
+  const recentRows = Array.isArray(snapshotReplay?.recent) ? snapshotReplay.recent : [];
+  const scenarioReplay = scenario?.replaySignal || snapshotDraft?.deterministicScenarioLab?.replaySignal || {};
+  const latest = snapshotReplay?.latest || scenarioReplay || compactRows[0] || recentRows[0] || {};
+
+  const hasScenarioReplay = scenarioReplay && scenarioReplay.missingReplay === false;
+  const hasLatest = latest && typeof latest === "object" && Object.keys(latest).length > 0;
+  const recordCount = Math.max(compactRows.length, recentRows.length, hasLatest ? 1 : 0, hasScenarioReplay ? 1 : 0);
+
+  const observedReaction =
+    latest?.observedReaction ||
+    latest?.post60?.observedReaction ||
+    latest?.post15?.observedReaction ||
+    scenarioReplay?.observedReaction ||
+    "";
+
+  const alignment =
+    latest?.alignment ||
+    latest?.reactionAlignment ||
+    latest?.post60?.alignment ||
+    latest?.post15?.alignment ||
+    scenarioReplay?.alignment ||
+    (recordCount > 0 ? "inconclusive" : "missing");
+
   return {
-    recordCount: rows.length,
-    observedReaction: latest?.observedReaction || latest?.goldReaction || "",
+    recordCount,
+    observedReaction,
     alignment,
-    reliability: rows.length >= 5 ? "stronger" : rows.length > 0 ? "limited" : "missing",
+    reliability: recordCount >= 5 ? "stronger" : recordCount > 0 ? "limited" : "missing",
+    latestEventName: latest?.eventName || scenarioReplay?.eventName || "",
+    latestEventDate: latest?.eventDate || scenarioReplay?.eventDate || "",
   };
 }
 
@@ -12830,12 +12854,23 @@ function buildFundamentalScenariosForSnapshot({ scenario, calendarRisk, employme
   };
 }
 
+function countCalendarEventsForFundamental(snapshotDraft = {}) {
+  const calendar = snapshotDraft?.calendar || {};
+  if (Array.isArray(calendar)) return calendar.length;
+  const upcoming = Array.isArray(calendar?.upcomingHighImpact) ? calendar.upcomingHighImpact : [];
+  const next72 = Array.isArray(calendar?.eventRiskSummary?.next72h) ? calendar.eventRiskSummary.next72h : [];
+  const highNext72 = Array.isArray(calendar?.eventRiskSummary?.highNext72h) ? calendar.eventRiskSummary.highNext72h : [];
+  const hasNextMajor = calendar?.nextMajor || calendar?.eventRiskSummary?.nextMajor || calendar?.eventRiskSummary?.nextEvent;
+  return Math.max(upcoming.length, next72.length, highNext72.length, hasNextMajor ? 1 : 0);
+}
+
 function buildFundamentalContext(snapshotDraft, scenario, fredCompact, replayCompact) {
-  const calendarRows = snapshotDraft?.calendar || [];
+  const calendarRows = Array.isArray(snapshotDraft?.calendar) ? snapshotDraft.calendar : (snapshotDraft?.calendar?.upcomingHighImpact || snapshotDraft?.calendar?.eventRiskSummary?.next72h || []);
+  const calendarEventCount = countCalendarEventsForFundamental(snapshotDraft);
   const employmentEvent = snapshotDraft?.employmentEvent || {};
   const calendarRisk = normalizeCalendarRiskForFundamental(calendarRows, scenario);
   const eventForecasts = buildEventForecastsForFundamental(calendarRisk, employmentEvent);
-  const replayEvidence = normalizeReplayForFundamental(replayCompact);
+  const replayEvidence = normalizeReplayForFundamental(replayCompact, snapshotDraft, scenario);
   const h = employmentEvent?.headline || {};
   const q = employmentEvent?.quality || {};
   const d = employmentEvent?.details || {};
@@ -12905,8 +12940,8 @@ function buildFundamentalContext(snapshotDraft, scenario, fredCompact, replayCom
     confirmationRequired,
     sourceTrace: {
       fredRows: Array.isArray(fredCompact) ? fredCompact.length : 0,
-      calendarEvents: Array.isArray(calendarRows) ? calendarRows.length : 0,
-      replayRecords: Array.isArray(replayCompact) ? replayCompact.length : 0,
+      calendarEvents: calendarEventCount,
+      replayRecords: replayEvidence.recordCount,
       employmentStatus: employmentEvent?.status || "unknown",
     },
   };
@@ -12923,7 +12958,7 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.41.6.2",
+        appVersion: "GoldScope v2.41.6.2.2",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -16241,7 +16276,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.6.2",
+        appVersion: "GoldScope v2.41.6.2.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -16594,7 +16629,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.6.2",
+        appVersion: "GoldScope v2.41.6.2.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -16797,7 +16832,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.6.2",
+        appVersion: "GoldScope v2.41.6.2.2",
         prototypeBoundary: "Product UX shell over local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -17057,7 +17092,7 @@ ${err.stack || err.message || String(err)}`);
   }
 
   const views = {
-    dashboard: <ProductDashboardPage />,
+    dashboard: <ProductDashboardPage onNavigate={setTab} onRefreshMacroNews={() => { refreshFred(); refreshGdelt(); }} />,
     analytics: <ProductAnalyticsPage />,
     alerts: <ProductAlertsPage />,
     control: <ControlCenter />,
@@ -17097,7 +17132,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.6.2</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.6.2.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
