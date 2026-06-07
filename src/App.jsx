@@ -3952,7 +3952,9 @@ function macroFundamentalOverlayMapper(snapshot) {
     newsStrength,
     replayAlignment,
     reason: employmentSignal === "stronger_than_expected"
-      ? "NFP headline is stronger than expected, but sector composition, wages, USD/yields and replay confirmation are incomplete."
+      ? (e?.details?.compositionSignal === "composition_verified"
+          ? `NFP headline is stronger than expected and sector composition is ${e.details.sectorConcentration || "mixed"} with laborQualitySignal=${e.details.laborQualitySignal || e.quality?.laborQualitySignal || "mixed"}, but wage pressure, USD/yields and replay confirmation are still required.`
+          : "NFP headline is stronger than expected, but sector composition, wages, USD/yields and replay confirmation are incomplete.")
       : "Macro confirmation is incomplete; treat the trade plan as conditional research only.",
     confirmationRequired: ["DXY", "DGS10", "DFII10", "CPI", "gold reaction"],
   };
@@ -4417,8 +4419,8 @@ function buildEmploymentEventReportRow(snapshot) {
     ? `surpriseK=${h.surpriseK}; surpriseDirection=${h.surpriseDirection || "unknown"}; previousDeltaK=${h.previousDeltaK ?? "unknown"}; previousComparison=${h.previousComparison || "unknown"}`
     : "labor surprise cannot be calculated";
 
-  const compositionPart = d.sectorConcentration && d.sectorConcentration !== "not_yet_verified"
-    ? `sectorConcentration=${d.sectorConcentration}`
+  const compositionPart = d.compositionSignal === "composition_verified"
+    ? `sectorConcentration=${d.sectorConcentration || "mixed"}; compositionSignal=composition_verified; laborQualitySignal=${d.laborQualitySignal || q.laborQualitySignal || "mixed"}`
     : "sector composition not_yet_verified";
 
   return `| Employment event intelligence | PAYEMS actual=${h.actual || "missing"} from ${h.actualSource || "FRED PAYEMS fallback"}; UNRATE=${d.unemploymentRate || "missing"} from ${d.unemploymentRateSource || "FRED UNRATE fallback"}; ${forecastPart}; ${previousPart}; ${compositionPart} | ${surprisePart}; goldImpact=${q.goldImpact || "wait_for_confirmation"} | ${e.status || "partial"} |`;
@@ -4466,11 +4468,17 @@ function buildValidationSafeGoldReport(snapshot, validation) {
   const employmentHeadline = employmentEvent?.headline || {};
   const employmentDetails = employmentEvent?.details || {};
   const employmentQuality = employmentEvent?.quality || {};
+  const employmentCompositionVerified = employmentDetails?.compositionSignal === "composition_verified" || employmentQuality?.compositionSignal === "composition_verified";
+  const employmentCompositionText = employmentCompositionVerified
+    ? `sector composition is verified as ${employmentDetails.sectorConcentration || "mixed"} with laborQualitySignal=${employmentDetails.laborQualitySignal || employmentQuality.laborQualitySignal || "mixed"}`
+    : "sector composition is still missing/not verified";
   const employmentSafeText = employmentPartialFredBackfill
-    ? `Prior Employment Situation event is available through mixed sources: PAYEMS actual=${employmentHeadline.actual || "missing"} from ${employmentHeadline.actualSource || "FRED PAYEMS fallback"}; forecast=${employmentHeadline.forecast || "missing"} from ${employmentHeadline.forecastSource || "calendar/provider"}; previous=${employmentHeadline.previous || "missing"} from ${employmentHeadline.previousSource || "calendar/provider"}; UNRATE=${employmentDetails.unemploymentRate || "missing"} from ${employmentDetails.unemploymentRateSource || "FRED UNRATE fallback"}. surpriseK=${employmentHeadline.surpriseK ?? "unknown"}, surpriseDirection=${employmentHeadline.surpriseDirection || "unknown"}, previousDeltaK=${employmentHeadline.previousDeltaK ?? "unknown"}, previousComparison=${employmentHeadline.previousComparison || "unknown"}. Wage data and sector composition are still missing/not verified, so goldImpact=${employmentQuality.goldImpact || "wait_for_confirmation"} remains conditional.`
+    ? `Prior Employment Situation event is available through mixed sources: PAYEMS actual=${employmentHeadline.actual || "missing"} from ${employmentHeadline.actualSource || "FRED PAYEMS fallback"}; forecast=${employmentHeadline.forecast || "missing"} from ${employmentHeadline.forecastSource || "calendar/provider"}; previous=${employmentHeadline.previous || "missing"} from ${employmentHeadline.previousSource || "calendar/provider"}; UNRATE=${employmentDetails.unemploymentRate || "missing"} from ${employmentDetails.unemploymentRateSource || "FRED UNRATE fallback"}. surpriseK=${employmentHeadline.surpriseK ?? "unknown"}, surpriseDirection=${employmentHeadline.surpriseDirection || "unknown"}, previousDeltaK=${employmentHeadline.previousDeltaK ?? "unknown"}, previousComparison=${employmentHeadline.previousComparison || "unknown"}. ${employmentCompositionText}; wage pressure, USD/yields confirmation, and replay alignment are still required, so goldImpact=${employmentQuality.goldImpact || "wait_for_confirmation"} remains conditional.`
     : "";
   const eventEvidenceWording = employmentPartialFredBackfill
-    ? "Next CPI actual/forecast values are missing; prior Employment event has actual/forecast/previous context, but wage data, sector composition, USD/yields confirmation, and replay alignment are still incomplete"
+    ? (employmentCompositionVerified
+        ? "Next CPI actual/forecast values are missing; prior Employment event has actual/forecast/previous context and verified sector composition, but wage pressure, USD/yields confirmation, and replay alignment are still incomplete"
+        : "Next CPI actual/forecast values are missing; prior Employment event has actual/forecast/previous context, but wage data, sector composition, USD/yields confirmation, and replay alignment are still incomplete")
     : "event actual/forecast values are missing";
   const employmentEvidenceRow = employmentPartialFredBackfill
     ? buildEmploymentEventReportRow(snapshot)
@@ -11263,19 +11271,56 @@ function eventActualForecastExtractor(event, result = {}) {
   };
 }
 
-function parseSectorCompositionText(text) {
-  const raw = String(text || "").trim();
-  if (!raw) return [];
+function normalizeBlsSectorChangeToK(rawNumber, rawText = "") {
+  if (rawNumber === null || rawNumber === undefined || rawNumber === "") return null;
+  const cleaned = String(rawNumber).replace(/,/g, "").trim();
+  const value = Number(cleaned);
+  if (!Number.isFinite(value)) return null;
 
-  const aliases = [
+  const text = String(rawText || "");
+  // BLS prose often says "68,000 jobs"; convert to 68K.
+  if (/,000\b/.test(String(rawNumber)) || /\bthousand\b/i.test(text) || /\d+\s*,\s*000\b/.test(text) || Math.abs(value) >= 1000) {
+    return Number((value / 1000).toFixed(1));
+  }
+  return Number(value.toFixed(1));
+}
+
+function extractBlsSectorChangeK(segment) {
+  const text = String(segment || "");
+  if (!text.trim()) return null;
+
+  if (/\b(?:changed little|little changed|essentially unchanged|flat)\b/i.test(text)) return 0;
+
+  const patterns = [
+    /(?:added|gained|increased(?:\s+by)?|rose(?:\s+by)?|was up(?:\s+by)?|up(?:\s+by)?)\s+([+-]?\d[\d,]*(?:\.\d+)?)\s*(?:,?000|thousand|k)?/i,
+    /(?:lost|declined(?:\s+by)?|decreased(?:\s+by)?|fell(?:\s+by)?|was down(?:\s+by)?|down(?:\s+by)?)\s+([+-]?\d[\d,]*(?:\.\d+)?)\s*(?:,?000|thousand|k)?/i,
+    /([+-]\s*\d[\d,]*(?:\.\d+)?)\s*(?:,?000|thousand|k)?\s*(?:jobs|payrolls|employment)?/i,
+    /(?:change|employment|payrolls|jobs)\s*[:=]\s*([+-]?\d[\d,]*(?:\.\d+)?)\s*(?:,?000|thousand|k)?/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) continue;
+    const isNegativeVerb = /(?:lost|declined|decreased|fell|down)/i.test(match[0]) && !/^\s*-/.test(String(match[1]));
+    const value = normalizeBlsSectorChangeToK(String(match[1]).replace(/\s+/g, ""), match[0]);
+    if (!Number.isFinite(value)) continue;
+    return isNegativeVerb ? -Math.abs(value) : value;
+  }
+
+  return null;
+}
+
+function getBlsSectorAliases() {
+  return [
     ["leisureAndHospitality", /leisure\s*(?:and|&)\s*hospitality/i, "Leisure and hospitality", "cyclical_or_event_sensitive"],
-    ["healthCareAndSocialAssistance", /health\s*care(?:\s*and\s*social\s*assistance)?|social\s*assistance/i, "Health care and social assistance", "defensive_structural"],
+    ["healthCare", /health\s*care(?!\s*and\s*social\s*assistance)/i, "Health care", "defensive_structural"],
+    ["socialAssistance", /social\s*assistance/i, "Social assistance", "defensive_structural"],
     ["government", /\bgovernment\b/i, "Government", "public_sector"],
     ["professionalAndBusinessServices", /professional\s*(?:and|&)\s*business\s*services|business\s*services/i, "Professional and business services", "higher_quality_private"],
     ["manufacturing", /\bmanufacturing\b/i, "Manufacturing", "cyclical_high_quality"],
     ["construction", /\bconstruction\b/i, "Construction", "cyclical_private"],
     ["retailTrade", /retail\s*trade/i, "Retail trade", "consumer_service"],
-    ["temporaryHelp", /temporary\s*help/i, "Temporary help services", "lower_quality_cyclical"],
+    ["temporaryHelp", /temporary\s*help(?:\s*services)?/i, "Temporary help services", "lower_quality_cyclical"],
     ["transportationAndWarehousing", /transportation\s*(?:and|&)\s*warehousing|warehousing/i, "Transportation and warehousing", "cyclical_private"],
     ["information", /\binformation\b/i, "Information", "higher_wage_private"],
     ["financialActivities", /financial\s*activities/i, "Financial activities", "higher_wage_private"],
@@ -11283,28 +11328,58 @@ function parseSectorCompositionText(text) {
     ["education", /\beducation\b/i, "Education", "mixed_public_private"],
     ["otherServices", /other\s*services/i, "Other services", "service_sector"],
   ];
+}
+
+function parseSectorCompositionText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return [];
+
+  const aliases = getBlsSectorAliases();
+  const chunks = raw
+    .replace(/\u2013|\u2014/g, "-")
+    .split(/\r?\n|(?<=[.!?])\s+|;/)
+    .map((x) => x.trim())
+    .filter(Boolean);
 
   const out = [];
+  const seen = new Set();
+
   for (const [key, re, label, qualityTag] of aliases) {
-    const lineMatch = raw
-      .split(/\r?\n|;/)
-      .map((x) => x.trim())
-      .find((line) => re.test(line));
+    let bestSegment = "";
 
-    if (!lineMatch) continue;
+    for (const chunk of chunks) {
+      const match = re.exec(chunk);
+      if (!match) continue;
 
-    const valueMatch =
-      lineMatch.match(/(?:\+|increase(?:d)?\s+by|added|gain(?:ed)?|change(?:d)?\s*[:=]?)\s*(-?\d+(?:\.\d+)?)\s*[kK]?/) ||
-      lineMatch.match(/(-?\d+(?:\.\d+)?)\s*[kK]?\s*(?:jobs|payrolls|employment|change)?/i);
+      const currentIndex = match.index ?? 0;
+      let nextIndex = chunk.length;
 
-    const changeK = valueMatch ? Number(valueMatch[1]) : null;
+      for (const [otherKey, otherRe] of aliases) {
+        if (otherKey === key) continue;
+        otherRe.lastIndex = 0;
+        const otherMatch = otherRe.exec(chunk);
+        if (otherMatch && otherMatch.index > currentIndex && otherMatch.index < nextIndex) {
+          nextIndex = otherMatch.index;
+        }
+      }
+
+      const segment = chunk.slice(currentIndex, nextIndex).replace(/^[,.\s]+|[,.\s]+$/g, "");
+      bestSegment = segment || chunk;
+      break;
+    }
+
+    if (!bestSegment || seen.has(key)) continue;
+    const changeK = extractBlsSectorChangeK(bestSegment);
+
     out.push({
       key,
       label,
       changeK: Number.isFinite(changeK) ? changeK : null,
+      direction: Number.isFinite(changeK) ? (changeK > 0 ? "positive" : changeK < 0 ? "negative" : "flat") : "unknown",
       qualityTag,
-      sourceText: lineMatch,
+      sourceText: bestSegment,
     });
+    seen.add(key);
   }
 
   return out;
@@ -11329,62 +11404,106 @@ function laborCompositionAnalyzer(headline, details) {
   const actualK = Number(headline?.actualK);
   const enriched = sectors.map((s) => ({
     ...s,
+    changeK: Number.isFinite(Number(s.changeK)) ? Number(s.changeK) : null,
     shareOfHeadline: Number.isFinite(actualK) && actualK !== 0 && Number.isFinite(Number(s.changeK))
       ? Number((Number(s.changeK) / actualK).toFixed(2))
       : null,
+    absShareOfHeadline: Number.isFinite(actualK) && actualK !== 0 && Number.isFinite(Number(s.changeK))
+      ? Number((Math.abs(Number(s.changeK)) / Math.abs(actualK)).toFixed(2))
+      : null,
   }));
 
+  const numeric = enriched.filter((s) => Number.isFinite(Number(s.changeK)));
+  const positive = numeric.filter((s) => Number(s.changeK) > 0);
+  const negative = numeric.filter((s) => Number(s.changeK) < 0);
+  const largest = [...numeric].sort((a, b) => Math.abs(Number(b.changeK)) - Math.abs(Number(a.changeK)))[0] || null;
+
+  const manufacturing = enriched.find((s) => s.key === "manufacturing");
+  const professional = enriched.find((s) => s.key === "professionalAndBusinessServices");
+  const temporaryHelp = enriched.find((s) => s.key === "temporaryHelp");
   const leisure = enriched.find((s) => s.key === "leisureAndHospitality");
-  const tempHelp = enriched.find((s) => s.key === "temporaryHelp");
-  const gov = enriched.find((s) => s.key === "government");
-  const higherQuality = enriched.filter((s) => ["professionalAndBusinessServices", "manufacturing", "construction", "financialActivities", "information"].includes(s.key));
+  const government = enriched.find((s) => s.key === "government");
+
+  const cyclicalWeak =
+    (manufacturing && Number(manufacturing.changeK) < 0) ||
+    (professional && Number(professional.changeK) < 0) ||
+    (temporaryHelp && Number(temporaryHelp.changeK) < 0);
+
+  const highQualityPrivateKeys = new Set(["professionalAndBusinessServices", "manufacturing", "construction", "financialActivities", "information"]);
+  const highQualityPrivateShare = enriched
+    .filter((s) => highQualityPrivateKeys.has(s.key) && Number(s.changeK) > 0)
+    .reduce((sum, s) => sum + (Number(s.shareOfHeadline) || 0), 0);
+
+  const topShare = Number(largest?.absShareOfHeadline);
+  const positiveCount = positive.length;
+  const numericCount = numeric.length;
+  const targetSectorKeys = new Set(["leisureAndHospitality", "healthCare", "government", "professionalAndBusinessServices", "manufacturing"]);
+  const targetSectorsDetected = enriched.filter((s) => targetSectorKeys.has(s.key)).map((s) => s.label);
 
   let sectorConcentration = "not_yet_verified";
   let breadth = "not_yet_verified";
   let compositionSignal = "composition_not_verified";
+  let laborQualitySignal = "not_verified";
   let eventSensitivityNote = "Sector composition is not available; do not infer durability from the headline alone.";
 
-  if (enriched.length) {
-    const largest = [...enriched]
-      .filter((s) => Number.isFinite(Number(s.changeK)))
-      .sort((a, b) => Math.abs(Number(b.changeK)) - Math.abs(Number(a.changeK)))[0];
+  if (numericCount) {
+    compositionSignal = "composition_verified";
 
-    const leisureHeavy = leisure && Number(leisure.shareOfHeadline) >= 0.25;
-    const tempHeavy = tempHelp && Number(tempHelp.shareOfHeadline) >= 0.15;
-    const govHeavy = gov && Number(gov.shareOfHeadline) >= 0.25;
-    const highQualityPrivate = higherQuality.reduce((sum, s) => sum + (Number(s.shareOfHeadline) || 0), 0);
-
-    if (leisureHeavy) {
-      sectorConcentration = "leisure_hospitality_heavy";
-      compositionSignal = "lower_quality_if_leisure_hospitality_concentrated";
-      eventSensitivityNote = "A large leisure/hospitality contribution can be seasonal or event-sensitive, so the headline beat should be discounted unless confirmed by broader private-sector hiring.";
-    } else if (tempHeavy) {
-      sectorConcentration = "temporary_help_heavy";
-      compositionSignal = "lower_quality_if_temporary_help_concentrated";
-      eventSensitivityNote = "Temporary-help concentration is a lower-quality cyclical hiring signal.";
-    } else if (govHeavy) {
-      sectorConcentration = "government_heavy";
-      compositionSignal = "lower_quality_if_public_sector_concentrated";
-      eventSensitivityNote = "Government-heavy hiring is less direct evidence of private-sector demand strength.";
-    } else if (highQualityPrivate >= 0.45) {
-      sectorConcentration = "higher_quality_private_broadening";
-      compositionSignal = "higher_quality_private_sector_support";
-      eventSensitivityNote = "Private-sector breadth is stronger when gains are spread across higher-quality categories.";
+    if (positiveCount >= 4 && Number.isFinite(topShare) && topShare <= 0.4) {
+      sectorConcentration = "broad_based";
+      breadth = "broad_based_verified";
+    } else if (positiveCount <= 2 || (Number.isFinite(topShare) && topShare >= 0.45)) {
+      sectorConcentration = "concentrated";
+      breadth = "concentrated_verified";
     } else {
-      sectorConcentration = largest?.key ? `${largest.key}_largest` : "mixed";
-      compositionSignal = "mixed_or_unclassified";
-      eventSensitivityNote = "Composition is available but does not show a clearly dominant quality signal.";
+      sectorConcentration = "mixed";
+      breadth = "mixed_verified";
     }
 
-    breadth = enriched.length >= 5 ? "broader_verified" : "partial_verified";
+    if (headline?.surpriseDirection === "stronger_than_expected") {
+      if (sectorConcentration === "broad_based" && !cyclicalWeak) {
+        laborQualitySignal = "headline_confirmed";
+        eventSensitivityNote = "The payroll beat is better supported because sector gains appear broad-based and cyclical/private-sector weakness is not evident in the parsed composition.";
+      } else if (sectorConcentration === "concentrated") {
+        laborQualitySignal = "headline_quality_weak";
+        eventSensitivityNote = "The payroll beat is less durable because gains appear concentrated in a limited set of sectors.";
+      } else if (cyclicalWeak) {
+        laborQualitySignal = "mixed";
+        eventSensitivityNote = "The payroll beat is less certain because manufacturing, professional services, or temporary-help details are weak.";
+      } else {
+        laborQualitySignal = "mixed";
+        eventSensitivityNote = "Composition is verified but mixed; treat the headline beat as quality-dependent.";
+      }
+    } else if (headline?.surpriseDirection === "weaker_than_expected") {
+      laborQualitySignal = sectorConcentration === "broad_based" ? "mixed" : "headline_quality_weak";
+      eventSensitivityNote = "Weak headline labor data should still be checked against sector breadth before inferring a durable slowdown.";
+    } else {
+      laborQualitySignal = "mixed";
+      eventSensitivityNote = "Composition is verified, but headline surprise is not strong enough to classify labor quality conclusively.";
+    }
   }
 
   return {
     sectorConcentration,
     breadth,
     compositionSignal,
+    laborQualitySignal,
     eventSensitivityNote,
     sectorBreakdown: enriched,
+    sectorBreadthStats: {
+      numericCount,
+      positiveCount,
+      negativeCount: negative.length,
+      topSector: largest?.label || "",
+      topSectorShare: Number.isFinite(topShare) ? topShare : null,
+      highQualityPrivateShare: Number(highQualityPrivateShare.toFixed(2)),
+      cyclicalWeak: Boolean(cyclicalWeak),
+      manufacturingSignal: manufacturing ? (Number(manufacturing.changeK) > 0 ? "positive" : Number(manufacturing.changeK) < 0 ? "negative" : "flat") : "missing",
+      professionalServicesSignal: professional ? (Number(professional.changeK) > 0 ? "positive" : Number(professional.changeK) < 0 ? "negative" : "flat") : "missing",
+      leisureHospitalityShare: Number.isFinite(Number(leisure?.shareOfHeadline)) ? Number(leisure.shareOfHeadline) : null,
+      governmentShare: Number.isFinite(Number(government?.shareOfHeadline)) ? Number(government.shareOfHeadline) : null,
+      targetSectorsDetected,
+    },
   };
 }
 
@@ -11399,17 +11518,24 @@ function laborQualityClassifier(headline, details, composition) {
   else if (weakHeadline) headlineSignal = "weak";
   else if (headline?.surpriseDirection === "near_forecast") headlineSignal = "near_forecast";
 
+  const laborQualitySignal = composition?.laborQualitySignal || "not_verified";
+
   let qualityScore = 0;
   if (strongHeadline) qualityScore += 2;
   if (weakHeadline) qualityScore -= 2;
 
-  if (composition?.compositionSignal?.startsWith("lower_quality")) qualityScore -= 1;
-  if (composition?.compositionSignal === "higher_quality_private_sector_support") qualityScore += 1;
+  if (laborQualitySignal === "headline_confirmed") qualityScore += 1;
+  if (laborQualitySignal === "headline_quality_weak") qualityScore -= 1;
+  if (laborQualitySignal === "mixed") qualityScore -= 0.25;
 
-  if (String(details?.averageHourlyEarningsMoM || "").includes("0.3")) qualityScore += 0.5;
+  const wageText = String(details?.averageHourlyEarningsMoM || "");
+  if (/\b0\.3\b|\b0\.4\b|\b0\.5\b/.test(wageText)) qualityScore += 0.5;
 
   let qualityLabel = "not_verified";
   if (headlineSignal === "actual_available_forecast_missing") qualityLabel = "actual_available_forecast_missing";
+  else if (strongHeadline && laborQualitySignal === "headline_confirmed") qualityLabel = "strong_and_higher_quality";
+  else if (strongHeadline && laborQualitySignal === "headline_quality_weak") qualityLabel = "headline_strong_but_quality_weak";
+  else if (strongHeadline && laborQualitySignal === "mixed") qualityLabel = "headline_strong_but_quality_dependent";
   else if (qualityScore >= 2.5) qualityLabel = "strong_and_higher_quality";
   else if (qualityScore >= 1) qualityLabel = "headline_strong_but_quality_dependent";
   else if (qualityScore <= -1) qualityLabel = "weak_or_lower_quality";
@@ -11418,6 +11544,7 @@ function laborQualityClassifier(headline, details, composition) {
   return {
     headlineSignal,
     compositionSignal: composition?.compositionSignal || "composition_not_verified",
+    laborQualitySignal,
     qualityScore: Number(qualityScore.toFixed(2)),
     qualityLabel,
     caveat: composition?.eventSensitivityNote || "Composition not verified.",
@@ -11429,16 +11556,16 @@ function fedImplicationMapper(headline, quality) {
     return "neutral_or_data_dependent";
   }
   if (headline?.surpriseDirection === "stronger_than_expected") {
-    if (quality?.qualityLabel === "headline_strong_but_quality_dependent") return "less_dovish_but_quality_dependent";
-    if (quality?.qualityLabel === "strong_and_higher_quality") return "less_dovish_or_more_hawkish";
-    return "less_dovish";
+    if (quality?.laborQualitySignal === "headline_confirmed") return "less_dovish_or_more_hawkish";
+    if (["headline_quality_weak", "mixed", "not_verified"].includes(quality?.laborQualitySignal)) return "less_dovish_but_quality_dependent";
+    return "less_dovish_but_quality_dependent";
   }
   if (headline?.surpriseDirection === "weaker_than_expected") return "more_dovish";
   return "neutral_or_data_dependent";
 }
 
 function goldImpactMapper(headline, quality, fedImplication) {
-  const confirmationRequired = ["DXY", "DGS10", "DFII10", "gold post-event reaction"];
+  const confirmationRequired = ["DXY", "DGS10", "DFII10", "wage pressure", "gold post-event reaction"];
 
   if (headline?.surpriseDirection === "forecast_missing" && headline?.actual) {
     return {
@@ -11449,82 +11576,116 @@ function goldImpactMapper(headline, quality, fedImplication) {
   }
 
   if (headline?.surpriseDirection === "stronger_than_expected") {
-    const compositionNotVerified =
-      !quality?.compositionSignal ||
-      quality?.compositionSignal === "composition_not_verified" ||
-      quality?.compositionSignal === "unknown";
+    if (quality?.laborQualitySignal === "headline_confirmed") {
+      return {
+        goldImpact: "bearish_if_usd_yields_confirm",
+        rationale: "Headline payrolls beat forecast and parsed sector composition appears broad-based, so the labor signal is higher quality and conditionally gold-negative if USD, nominal yields, real yields, and post-event gold reaction confirm.",
+        confirmationRequired,
+      };
+    }
+
+    if (quality?.laborQualitySignal === "headline_quality_weak") {
+      return {
+        goldImpact: "conditionally_bearish_quality_discounted",
+        rationale: "Headline payrolls beat forecast, but parsed sector composition appears concentrated or lower quality. Treat the first-order gold-negative signal as discounted until wage pressure, USD/yields, and post-event gold reaction confirm.",
+        confirmationRequired,
+      };
+    }
 
     return {
-      goldImpact: compositionNotVerified ? "conditionally_bearish" : "bearish_if_usd_yields_confirm",
-      rationale: compositionNotVerified
-        ? "Headline payrolls beat forecast, which is less dovish and conditionally gold-negative, but sector composition, wage pressure, USD/yields, and post-event gold reaction are still required before confirming the signal."
-        : "Headline payrolls beat forecast; confirm through USD, nominal yields, real yields, and post-event gold reaction.",
+      goldImpact: "conditionally_bearish",
+      rationale: "Headline payrolls beat forecast, but labor-quality confirmation remains mixed or incomplete. Confirm through sector breadth, wage pressure, USD, nominal yields, real yields, and post-event gold reaction.",
       confirmationRequired,
     };
   }
 
-  if (fedImplication === "more_dovish") {
+  if (headline?.surpriseDirection === "weaker_than_expected") {
     return {
       goldImpact: "conditionally_bullish",
-      rationale: "A weaker labor surprise can support gold if it lowers USD, nominal yields, and real yields.",
-      confirmationRequired,
-    };
-  }
-
-  if (String(fedImplication).includes("less_dovish") || String(fedImplication).includes("hawkish")) {
-    return {
-      goldImpact: quality?.compositionSignal?.startsWith("lower_quality") ? "bearish_but_downgraded_by_composition" : "conditionally_bearish",
-      rationale: "A stronger labor surprise is first-order gold-negative if it lifts USD/yields or reduces rate-cut expectations; composition quality can weaken or strengthen that signal.",
+      rationale: "A weaker payroll surprise can support gold if USD/yields fall, but confirmation from market reaction is required.",
       confirmationRequired,
     };
   }
 
   return {
     goldImpact: "wait_for_confirmation",
-    rationale: "The labor signal is not strong enough to infer gold direction without USD/yield and post-event reaction confirmation.",
+    rationale: "Employment headline is not directionally interpretable without a clear surprise and market reaction.",
     confirmationRequired,
   };
 }
 
+function parseEmploymentKValue(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
 
-function recomputeEmploymentHeadlineDerivedFields(headline) {
-  const h = headline || {};
+  const raw = String(value || "").trim();
+  if (!raw) return null;
 
-  h.actualK = parseMacroNumber(h.actual);
-  h.forecastK = parseMacroNumber(h.forecast);
-  h.previousK = parseMacroNumber(h.previous);
-
-  h.surpriseK = Number.isFinite(h.actualK) && Number.isFinite(h.forecastK)
-    ? Math.round(h.actualK - h.forecastK)
-    : null;
-
-  h.previousDeltaK = Number.isFinite(h.actualK) && Number.isFinite(h.previousK)
-    ? Math.round(h.actualK - h.previousK)
-    : null;
-
-  if (Number.isFinite(h.surpriseK)) {
-    if (h.surpriseK > 10) h.surpriseDirection = "stronger_than_expected";
-    else if (h.surpriseK < -10) h.surpriseDirection = "weaker_than_expected";
-    else h.surpriseDirection = "near_forecast";
-  } else if (!h.forecast) {
-    h.surpriseDirection = "forecast_missing";
-  } else {
-    h.surpriseDirection = "unknown";
+  const compact = raw.replace(/,/g, "").replace(/\s+/g, "");
+  const match = compact.match(/^([+-]?\d+(?:\.\d+)?)(k|K|thousand|m|M|million)?$/);
+  if (!match) {
+    const loose = compact.match(/([+-]?\d+(?:\.\d+)?)/);
+    if (!loose) return null;
+    return Number(loose[1]);
   }
 
-  if (Number.isFinite(h.previousDeltaK)) {
-    if (h.previousDeltaK > 10) h.previousComparison = "higher_than_previous";
-    else if (h.previousDeltaK < -10) h.previousComparison = "lower_than_previous";
-    else h.previousComparison = "near_previous";
-  } else if (!h.previous) {
-    h.previousComparison = "previous_missing";
-  } else {
-    h.previousComparison = "unknown";
-  }
+  const n = Number(match[1]);
+  if (!Number.isFinite(n)) return null;
 
-  return h;
+  const unit = String(match[2] || "").toLowerCase();
+  if (unit === "m" || unit === "million") return Number((n * 1000).toFixed(1));
+  return Number(n.toFixed(1));
 }
 
+function formatEmploymentKValue(value) {
+  const k = parseEmploymentKValue(value);
+  if (!Number.isFinite(k)) return "";
+  const rounded = Math.round(k);
+  return `${rounded}K`;
+}
+
+function recomputeEmploymentHeadlineDerivedFields(headline = {}) {
+  const actualK = parseEmploymentKValue(headline.actualK ?? headline.actual);
+  const forecastK = parseEmploymentKValue(headline.forecastK ?? headline.forecast);
+  const previousK = parseEmploymentKValue(headline.previousK ?? headline.previous);
+
+  if (Number.isFinite(actualK)) {
+    headline.actualK = actualK;
+    if (!headline.actual) headline.actual = formatEmploymentKValue(actualK);
+  }
+
+  if (Number.isFinite(forecastK)) {
+    headline.forecastK = forecastK;
+    if (!headline.forecast) headline.forecast = formatEmploymentKValue(forecastK);
+  }
+
+  if (Number.isFinite(previousK)) {
+    headline.previousK = previousK;
+    if (!headline.previous) headline.previous = formatEmploymentKValue(previousK);
+  }
+
+  if (Number.isFinite(actualK) && Number.isFinite(forecastK)) {
+    const surpriseK = Number((actualK - forecastK).toFixed(1));
+    headline.surpriseK = Math.round(surpriseK);
+    if (Math.abs(surpriseK) <= 10) headline.surpriseDirection = "near_forecast";
+    else headline.surpriseDirection = surpriseK > 0 ? "stronger_than_expected" : "weaker_than_expected";
+  } else {
+    headline.surpriseK = null;
+    headline.surpriseDirection = "forecast_missing";
+  }
+
+  if (Number.isFinite(actualK) && Number.isFinite(previousK)) {
+    const previousDeltaK = Number((actualK - previousK).toFixed(1));
+    headline.previousDeltaK = Math.round(previousDeltaK);
+    if (Math.abs(previousDeltaK) <= 15) headline.previousComparison = "near_previous";
+    else headline.previousComparison = previousDeltaK > 0 ? "above_previous" : "below_previous";
+  } else {
+    headline.previousDeltaK = null;
+    headline.previousComparison = "previous_missing";
+  }
+
+  return headline;
+}
 
 function buildEmploymentEventIntelligence(calendarEvents, eventResults, replayEvidence, fredRows = []) {
   const laborEvents = [...(calendarEvents || [])]
@@ -11631,13 +11792,18 @@ function buildEmploymentEventIntelligence(calendarEvents, eventResults, replayEv
       averageHourlyEarningsYoY: details.averageHourlyEarningsYoY,
       sectorConcentration: composition.sectorConcentration,
       breadth: composition.breadth,
+      compositionSignal: composition.compositionSignal,
+      laborQualitySignal: composition.laborQualitySignal,
       sectorBreakdown: composition.sectorBreakdown,
+      sectorBreadthStats: composition.sectorBreadthStats,
       parserStatus: details.parserStatus,
+      sectorCompositionSource: details.source || "",
       unemploymentRateSource: details.unemploymentRateSource || "",
     },
     quality: {
       headlineSignal: quality.headlineSignal,
       compositionSignal: quality.compositionSignal,
+      laborQualitySignal: quality.laborQualitySignal,
       laborQualityScore: quality.qualityScore,
       laborQualityLabel: quality.qualityLabel,
       fedImplication,
@@ -11687,11 +11853,15 @@ Details:
 - averageHourlyEarningsMoM=${e.details?.averageHourlyEarningsMoM || "missing"}
 - sectorConcentration=${e.details?.sectorConcentration || "not_yet_verified"}
 - breadth=${e.details?.breadth || "not_yet_verified"}
+- compositionSignal=${e.details?.compositionSignal || e.quality?.compositionSignal || "composition_not_verified"}
+- laborQualitySignal=${e.details?.laborQualitySignal || e.quality?.laborQualitySignal || "not_verified"}
+- sectorCompositionSource=${e.details?.sectorCompositionSource || "not_available"}
 Sector breakdown:
 ${sectors}
 Quality:
 - headlineSignal=${e.quality?.headlineSignal || "unknown"}
 - compositionSignal=${e.quality?.compositionSignal || "unknown"}
+- laborQualitySignal=${e.quality?.laborQualitySignal || "unknown"}
 - laborQualityLabel=${e.quality?.laborQualityLabel || "unknown"}
 - fedImplication=${e.quality?.fedImplication || "unknown"}
 - goldImpact=${e.quality?.goldImpact || "unknown"}
@@ -11712,7 +11882,7 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.41.4.3.1",
+        appVersion: "GoldScope v2.41.5.2",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -15026,7 +15196,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.4.3.1",
+        appVersion: "GoldScope v2.41.5.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -15379,7 +15549,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.4.3.1",
+        appVersion: "GoldScope v2.41.5.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -15582,7 +15752,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.4.3.1",
+        appVersion: "GoldScope v2.41.5.2",
         prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -15877,7 +16047,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.4.3.1</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.5.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
