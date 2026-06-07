@@ -3954,7 +3954,9 @@ function macroFundamentalOverlayMapper(snapshot) {
     reason: employmentSignal === "stronger_than_expected"
       ? (e?.details?.compositionSignal === "composition_verified"
           ? `NFP headline is stronger than expected and sector composition is ${e.details.sectorConcentration || "mixed"} with laborQualitySignal=${e.details.laborQualitySignal || e.quality?.laborQualitySignal || "mixed"}, but wage pressure, USD/yields and replay confirmation are still required.`
-          : "NFP headline is stronger than expected, but sector composition, wages, USD/yields and replay confirmation are incomplete.")
+          : e?.details?.parserStatus === "sector_text_present_but_unparsed"
+            ? "NFP headline is stronger than expected, but sectorCompositionText was present and not parsed; wage pressure, USD/yields and replay confirmation are still required."
+            : "NFP headline is stronger than expected, but sectorCompositionText is missing; BLS parser not executed. Wage pressure, USD/yields and replay confirmation are still required.")
       : "Macro confirmation is incomplete; treat the trade plan as conditional research only.",
     confirmationRequired: ["DXY", "DGS10", "DFII10", "CPI", "gold reaction"],
   };
@@ -4287,26 +4289,16 @@ function cleanupFinalResearchNoteGrammar(reportText) {
   const finalNote = "Technical context is bearish and weakens the bullish case, but directional bias remains blocked until CPI outcome, USD/yields reaction, employment-quality confirmation, and replay alignment improve.";
   let text = String(reportText || "");
 
-  // Fix malformed merged cleanup phrases such as:
-  // "The bearish Technical context is bearish and weakens the bullish case..."
   text = text
-    .replace(/The\s+bearish\s+Technical\s+context\s+is\s+bearish\s+and\s+weakens\s+the\s+bullish\s+case,\s*but\s+directional\s+bias\s+remains\s+blocked\s+until\s+CPI\s+outcome,\s*USD\/yields\s+reaction,\s*employment-quality\s+confirmation,\s*and\s+replay\s+alignment\s+improve\.\s*Gold\s+remains\s+vulnerable\s+to\s+USD\/yield\s+shifts\s+and\s+macro\s+surprises\./gi, finalNote)
-    .replace(/The\s+bearish\s+Technical\s+context\s+is\s+bearish\s+and\s+weakens\s+the\s+bullish\s+case,\s*but\s+directional\s+bias\s+remains\s+blocked\s+until\s+CPI\s+outcome,\s*USD\/yields\s+reaction,\s*employment-quality\s+confirmation,\s*and\s+replay\s+alignment\s+improve\./gi, finalNote)
+    .replace(/confirmed\s+technical\s+bearishness/gi, "bearish technical confirmation context")
     .replace(/The\s+bearish\s+Technical\s+context\s+is\s+bearish\s+and\s+weakens\s+the\s+bullish\s+case[^\n.]*\./gi, finalNote)
-    .replace(/Gold\s+remains\s+vulnerable\s+to\s+USD\/yield\s+shifts\s+and\s+macro\s+surprises\.?/gi, "")
-    .replace(/Technical\s+context\s+is\s+bearish\s+and\s+weakens\s+the\s+bullish\s+case,\s*but\s+directional\s+bias\s+remains\s+blocked\s+until\s+CPI\s+outcome,\s*USD\/yields\s+reaction,\s*employment-quality\s+confirmation,\s*and\s+replay\s+alignment\s+improve\.\s*\./gi, finalNote);
+    .replace(/Gold\s+remains\s+vulnerable\s+to\s+USD\/yield\s+shifts\s+and\s+macro\s+surprises\.?/gi, "");
 
-  // If the final note section still contains a technical-dominates-style sentence,
-  // replace the content of Section 10 only, preserving the report structure and Section 11.
+  // Deterministic Section 10 guard:
+  // Keep the heading and replace only the body. Section 11 remains untouched.
   text = text.replace(
     /(10\.\s*Final research note\s*\n)([\s\S]*?)(?=\n\s*<END_GOLDSCOPE_REPORT>|\n\s*11\.\s*Conditional trade scenario plan|$)/i,
-    (match, header, body) => {
-      const bodyText = String(body || "");
-      if (/Technical\s+context\s+dominates|The\s+bearish\s+Technical\s+context|Gold\s+remains\s+vulnerable/i.test(bodyText)) {
-        return `${header}${finalNote}`;
-      }
-      return match;
-    }
+    (match, header) => `${header}${finalNote}`
   );
 
   return text.replace(/\n{3,}/g, "\n\n").trim();
@@ -4420,8 +4412,10 @@ function buildEmploymentEventReportRow(snapshot) {
     : "labor surprise cannot be calculated";
 
   const compositionPart = d.compositionSignal === "composition_verified"
-    ? `sectorConcentration=${d.sectorConcentration || "mixed"}; compositionSignal=composition_verified; laborQualitySignal=${d.laborQualitySignal || q.laborQualitySignal || "mixed"}`
-    : "sector composition not_yet_verified";
+    ? `compositionSignal=composition_verified; sectorConcentration=${d.sectorConcentration || "mixed"}; laborQualitySignal=${d.laborQualitySignal || q.laborQualitySignal || "mixed"}`
+    : d.parserStatus === "sector_text_present_but_unparsed"
+      ? "parserStatus=sector_text_present_but_unparsed; compositionSignal=composition_not_verified"
+      : "sectorCompositionText missing; BLS parser not executed; compositionSignal=composition_not_verified";
 
   return `| Employment event intelligence | PAYEMS actual=${h.actual || "missing"} from ${h.actualSource || "FRED PAYEMS fallback"}; UNRATE=${d.unemploymentRate || "missing"} from ${d.unemploymentRateSource || "FRED UNRATE fallback"}; ${forecastPart}; ${previousPart}; ${compositionPart} | ${surprisePart}; goldImpact=${q.goldImpact || "wait_for_confirmation"} | ${e.status || "partial"} |`;
 }
@@ -4471,7 +4465,9 @@ function buildValidationSafeGoldReport(snapshot, validation) {
   const employmentCompositionVerified = employmentDetails?.compositionSignal === "composition_verified" || employmentQuality?.compositionSignal === "composition_verified";
   const employmentCompositionText = employmentCompositionVerified
     ? `sector composition is verified as ${employmentDetails.sectorConcentration || "mixed"} with laborQualitySignal=${employmentDetails.laborQualitySignal || employmentQuality.laborQualitySignal || "mixed"}`
-    : "sector composition is still missing/not verified";
+    : employmentDetails?.parserStatus === "sector_text_present_but_unparsed"
+      ? "sectorCompositionText is present but no recognized sector rows were parsed"
+      : "sectorCompositionText missing; BLS parser not executed";
   const employmentSafeText = employmentPartialFredBackfill
     ? `Prior Employment Situation event is available through mixed sources: PAYEMS actual=${employmentHeadline.actual || "missing"} from ${employmentHeadline.actualSource || "FRED PAYEMS fallback"}; forecast=${employmentHeadline.forecast || "missing"} from ${employmentHeadline.forecastSource || "calendar/provider"}; previous=${employmentHeadline.previous || "missing"} from ${employmentHeadline.previousSource || "calendar/provider"}; UNRATE=${employmentDetails.unemploymentRate || "missing"} from ${employmentDetails.unemploymentRateSource || "FRED UNRATE fallback"}. surpriseK=${employmentHeadline.surpriseK ?? "unknown"}, surpriseDirection=${employmentHeadline.surpriseDirection || "unknown"}, previousDeltaK=${employmentHeadline.previousDeltaK ?? "unknown"}, previousComparison=${employmentHeadline.previousComparison || "unknown"}. ${employmentCompositionText}; wage pressure, USD/yields confirmation, and replay alignment are still required, so goldImpact=${employmentQuality.goldImpact || "wait_for_confirmation"} remains conditional.`
     : "";
@@ -5959,6 +5955,186 @@ function useStoredSettings() {
   return [settings, setSettings];
 }
 
+
+const UI_FA_EXACT = {
+  "Home": "خانه",
+  "Chart": "نمودار",
+  "Technical": "تکنیکال",
+  "Events": "رویدادها",
+  "Scenario": "سناریو",
+  "AI Analysis": "تحلیل AI",
+  "Health": "سلامت منابع",
+  "Export": "خروجی",
+  "Settings": "تنظیمات",
+  "Gold Research Bias": "سوگیری پژوهشی طلا",
+  "Bias + scenario + risk, never direct buy/sell advice.": "سوگیری + سناریو + ریسک؛ هرگز توصیه مستقیم خرید/فروش نیست.",
+  "Event Risk": "ریسک رویداد",
+  "Calendar-derived risk state.": "وضعیت ریسک استخراج‌شده از تقویم.",
+  "Event Results": "نتایج رویدادها",
+  "Actual / forecast enrichment.": "تکمیل داده‌های actual / forecast.",
+  "Event Replay": "بازپخش رویداد",
+  "Retrospective reaction reconstruction.": "بازسازی واکنش بازار به‌صورت گذشته‌نگر.",
+  "Auto Post-Event Tracking": "رهگیری خودکار پس از رویداد",
+  "Local tracking jobs.": "وظایف رهگیری محلی.",
+  "Post-Event Reaction": "واکنش پس از رویداد",
+  "Saved reaction records.": "رکوردهای ذخیره‌شده واکنش.",
+  "Scenario Lab": "آزمایشگاه سناریو",
+  "Structured bullish / bearish / wait cases.": "سناریوهای ساختاریافته صعودی / نزولی / انتظار.",
+  "Export / BI Bridge": "خروجی / پل BI",
+  "Local records ready for future migration.": "رکوردهای محلی آماده مهاجرت بعدی.",
+  "Next Development Path": "مسیر توسعه بعدی",
+  "Current v2 scope.": "دامنه فعلی v2.",
+  "GDELT Gold News Intelligence": "هوش خبری طلای GDELT",
+  "Free global news; query defaults to English gold-price headlines.": "خبرهای رایگان جهانی؛ جست‌وجو به‌صورت پیش‌فرض روی تیترهای انگلیسی مرتبط با قیمت طلا تنظیم شده است.",
+  "FRED Macro Pressure": "فشار ماکروی FRED",
+  "Gold-impact interpretation from FRED macro series.": "تفسیر اثر بر طلا بر اساس سری‌های ماکروی FRED.",
+  "Macro Regime Summary": "خلاصه رژیم ماکرو",
+  "Readable interpretation of FRED macro pressure for gold.": "تفسیر خوانا از فشار ماکروی FRED برای طلا.",
+  "FRED Macro Drivers": "محرک‌های ماکروی FRED",
+  "US yields, real-yield proxy, inflation, labor and dollar pressure for gold.": "بازدهی‌ها، پروکسی بازده واقعی، تورم، بازار کار و فشار دلار بر طلا.",
+  "AI Output": "خروجی AI",
+  "The report should end with <END_GOLDSCOPE_REPORT>.": "گزارش باید با <END_GOLDSCOPE_REPORT> پایان یابد.",
+  "Prompt Preview": "Preview prompt",
+  "For debugging only. You do not need to edit it manually.": "فقط برای دیباگ؛ نیازی به ویرایش دستی آن نیست.",
+  "Important:": "مهم:",
+  "Research software only. No financial advice, no broker connection, no automatic trading. XAUUSD can be highly volatile.": "این نرم‌افزار صرفاً پژوهشی است. نه توصیه مالی می‌دهد، نه به بروکر وصل می‌شود و نه معامله خودکار انجام می‌دهد. XAUUSD می‌تواند بسیار پرنوسان باشد.",
+  "Live XAUUSD Chart": "نمودار زنده XAUUSD",
+  "TradingView OANDA:XAUUSD": "TradingView OANDA:XAUUSD",
+  "Technical panel error": "خطای پنل تکنیکال",
+  "The Technical UI failed to render, but the analysis engine is not affected.": "رندر رابط کاربری تکنیکال با خطا مواجه شد، اما موتور تحلیل تحت تأثیر قرار نگرفته است.",
+  "This is a UI-only failure. Report generation, validators, macro logic, employment logic, and BLS parser are unchanged.": "این خطا فقط مربوط به UI است. تولید گزارش، ولیدیتورها، منطق ماکرو، منطق اشتغال و parser مربوط به BLS تغییری نکرده‌اند.",
+  "Step 1 - Internal Ollama Proxy": "مرحله ۱ - پراکسی داخلی Ollama",
+  "Built into Vite. No separate proxy BAT is needed.": "داخل Vite تعبیه شده است و به فایل BAT جداگانه برای پراکسی نیاز نیست.",
+  "Step 2 - Ollama": "مرحله ۲ - Ollama",
+  "No API key. Uses your installed local model.": "به API key نیاز ندارد و از مدل محلی نصب‌شده شما استفاده می‌کند.",
+  "Step 3 - Macro-Guarded Context Prompt": "مرحله ۳ - پرامپت زمینه با گارد ماکرو",
+  "GoldScope builds the prompt automatically from current state.": "GoldScope پرامپت را به‌صورت خودکار از وضعیت فعلی می‌سازد.",
+  "Step 4 - Run": "مرحله ۴ - اجرا",
+  "First smoke test. Then run no-think macro-guarded GoldScope analysis.": "ابتدا تست smoke را اجرا کن، سپس تحلیل GoldScope با گارد ماکرو و بدون think را اجرا کن.",
+  "Model": "مدل",
+  "Prompt mode": "حالت پرامپت",
+  "Output depth": "عمق خروجی",
+  "Full scenario lab": "آزمایشگاه کامل سناریو",
+  "Pre-event briefing": "جمع‌بندی پیش از رویداد",
+  "Post-event verdict": "جمع‌بندی پس از رویداد",
+  "Contradiction detector": "آشکارساز تناقض",
+  "Concise": "خلاصه",
+  "Standard": "استاندارد",
+  "Deep": "عمیق",
+  "Check internal proxy": "بررسی پراکسی داخلی",
+  "Check Ollama": "بررسی Ollama",
+  "Load technical context": "Load technical context",
+  "Preview prompt": "Preview prompt",
+  "Run smoke test": "Run smoke test",
+  "Run no-think macro-guarded AI analysis": "Run no-think macro-guarded AI analysis",
+  "Copy output": "Copy output",
+  "Copy prompt": "Copy prompt",
+  "Download AI record": "Download AI record",
+  "Running...": "Running...",
+  "Uses latest AI Engine snapshot": "استفاده از آخرین snapshot موتور AI",
+  "No invented thresholds: on": "عدم ساخت آستانه‌های جعلی: فعال",
+  "Macro logic guard: on": "گارد منطق ماکرو: فعال",
+};
+
+function faUiText(input) {
+  const raw = String(input ?? "");
+  if (!raw) return raw;
+  let s = raw;
+  if (UI_FA_EXACT[s]) return UI_FA_EXACT[s];
+  const replacements = [
+    [/\bGold-only\b/g, "فقط طلا"],
+    [/\blive\b/gi, "زنده"],
+    [/\bpartial\b/gi, "ناقص"],
+    [/\bsupportive\b/gi, "حمایتی"],
+    [/\bnegative\b/gi, "منفی"],
+    [/\bbullish\b/gi, "صعودی"],
+    [/\bbearish\b/gi, "نزولی"],
+    [/\bmixed\b/gi, "ترکیبی"],
+    [/\bneutral\b/gi, "خنثی"],
+    [/\buncertain\b/gi, "نامطمئن"],
+    [/\bwarning\b/gi, "هشدار"],
+    [/\bgood\b/gi, "مناسب"],
+    [/\berror\b/gi, "خطا"],
+    [/\bmissing-key\b/gi, "کلید ناموجود"],
+    [/\bRefresh GDELT\b/g, "Refresh GDELT"],
+    [/\bRefresh FRED\b/g, "Refresh FRED"],
+    [/\bnext major:\b/gi, "رویداد مهم بعدی:"],
+    [/\bsaved\b/gi, "ذخیره‌شده"],
+    [/\breplay records\b/gi, "رکورد بازپخش"],
+    [/\benabled\b/gi, "فعال"],
+    [/\bdisabled\b/gi, "غیرفعال"],
+    [/\bjobs\b/gi, "وظیفه"],
+    [/\bcompleted\b/gi, "تکمیل‌شده"],
+    [/\bcalendar\b/gi, "تقویم"],
+    [/\breactions\b/gi, "واکنش‌ها"],
+    [/\breplay\b/gi, "بازپخش"],
+    [/\bmacro score\b/gi, "امتیاز ماکرو"],
+    [/\bNews score\b/g, "امتیاز خبر"],
+    [/\bFRED score\b/g, "امتیاز FRED"],
+    [/\bTotal\b/g, "مجموع"],
+    [/\bLoaded from file or paste manually\b/g, "از فایل بارگذاری می‌شود یا دستی وارد کنید"],
+  ];
+  for (const [pattern, value] of replacements) s = s.replace(pattern, value);
+  return s;
+}
+
+function localizeGoldScopeReportFa(input) {
+  let s = String(input || "");
+  if (!s) return s;
+  const blockReplacements = [
+    [/^1\.\s*Dominant research scenario/m, "۱. سناریوی غالب پژوهشی"],
+    [/^2\.\s*Confidence score/m, "۲. امتیاز اطمینان"],
+    [/^3\.\s*Evidence table/m, "۳. جدول شواهد"],
+    [/^4\.\s*Bullish case for gold/m, "۴. سناریوی صعودی برای طلا"],
+    [/^5\.\s*Bearish case for gold/m, "۵. سناریوی نزولی برای طلا"],
+    [/^6\.\s*Wait\/neutral case/m, "۶. سناریوی انتظار / خنثی"],
+    [/^7\.\s*Technical confirmation/m, "۷. تأیید تکنیکال"],
+    [/^8\.\s*Decision gates/m, "۸. دروازه‌های تصمیم"],
+    [/^9\.\s*Next catalyst plan/m, "۹. برنامه کاتالیزور بعدی"],
+    [/^10\.\s*Final research note/m, "۱۰. یادداشت نهایی پژوهش"],
+    [/^11\.\s*Conditional trade scenario plan/m, "۱۱. برنامه سناریوی شرطی معامله"],
+    [/<END_GOLDSCOPE_REPORT>/g, "<END_GOLDSCOPE_REPORT>"],
+  ];
+  for (const [p, r] of blockReplacements) s = s.replace(p, r);
+  const lineReplacements = [
+    [/\*\*Wait-Neutral\*\*/g, "**انتظار / خنثی**"],
+    [/\*\*(\d+)\*\*/g, "**$1**"],
+    [/\| Evidence block \| Current state \| Gold implication \| Reliability \|/g, "| بلوک شواهد | وضعیت فعلی | اثر بر طلا | اتکاپذیری |"],
+    [/\| Macro \|/g, "| ماکرو |"],
+    [/\| News \|/g, "| اخبار |"],
+    [/\| Calendar\/event risk \|/g, "| ریسک تقویم/رویداد |"],
+    [/\| Employment event intelligence \|/g, "| هوش رویداد اشتغال |"],
+    [/\| Replay evidence \|/g, "| شواهد بازپخش |"],
+    [/\| Technical context \|/g, "| زمینه تکنیکال |"],
+    [/\| Source\/data readiness \|/g, "| آمادگی منبع/داده |"],
+    [/\bWait-Neutral\b/g, "انتظار / خنثی"],
+    [/\bPrimary plan:\s*/g, "سناریوی اصلی: "],
+    [/\bAlternative plan 1:\s*/g, "سناریوی جایگزین ۱: "],
+    [/\bAlternative plan 2:\s*/g, "سناریوی جایگزین ۲: "],
+    [/\bAlternative plan 3:\s*/g, "سناریوی جایگزین ۳: "],
+    [/\bFundamental overlay:/g, "پیوست بنیادی:"],
+    [/\bDecision:/g, "تصمیم:"],
+    [/\bEntry zone:/g, "محدوده ورود:"],
+    [/\bEntry source:/g, "منبع سطح ورود:"],
+    [/\bTrigger:/g, "شرط فعال‌سازی:"],
+    [/\bStop loss:/g, "حد ضرر:"],
+    [/\bStop source:/g, "منبع حد ضرر:"],
+    [/\bTargets:/g, "اهداف قیمتی:"],
+    [/\bTarget source:/g, "منبع اهداف:"],
+    [/\bSafer entry:/g, "ورود امن‌تر:"],
+    [/\bRationale:/g, "منطق سناریو:"],
+    [/\bValidity:/g, "شرط اعتبار:"],
+    [/\bRisk note:/g, "یادداشت ریسک:"],
+    [/\bConfirmation required:/g, "تأییدهای موردنیاز:"],
+    [/\bEmployment signal:/g, "سیگنال اشتغال:"],
+    [/\bemployment gold impact:/g, "اثر اشتغال بر طلا:"],
+    [/\bCPI status:/g, "وضعیت CPI:"],
+    [/\bDo not force a trade until one of the triggers is confirmed\./g, "تا زمانی که یکی از تریگرها تأیید نشده است، معامله‌ای را تحمیل نکن."],
+  ];
+  for (const [p, r] of lineReplacements) s = s.replace(p, r);
+  return s;
+}
+
 function colorFor(value) {
   const v = String(value || "").toLowerCase();
   if (["live", "supportive", "bullish", "good"].includes(v)) return C.green;
@@ -6030,7 +6206,7 @@ function TradingViewChart() {
 
 export default function App() {
   const [settings, setSettings] = useStoredSettings();
-  const [tab, setTab] = useState("control");
+  const [tab, setTab] = useState("dashboard");
   const [smartRunStatus, setSmartRunStatus] = useState("ready");
   const [aiHistory, setAiHistory] = useState(() => {
     try {
@@ -6795,14 +6971,10 @@ export default function App() {
   const filteredNews = newsFilter === "all" ? news : news.filter((n) => n.impact === newsFilter);
 
   const tabs = [
-    ["control", "Home"],
-    ["chart", "Chart"],
-    ["technical", "Technical"],
-    ["eventRisk", "Events"],
-    ["scenarioLab", "Scenario"],
+    ["dashboard", "Dashboard"],
+    ["analytics", "Analytics"],
+    ["alerts", "Alerts"],
     ["aiEngine", "AI Analysis"],
-    ["health", "Health"],
-    ["export", "Export"],
     ["settings", "Settings"],
   ];
 
@@ -8028,6 +8200,661 @@ function TechnicalDashboardPanel() {
     </TechnicalPanelErrorBoundary>
   );
 }
+
+function TradeScenarioDashboardPanel() {
+  const readSnapshot = () => {
+    try {
+      const raw = localStorage.getItem("goldscope.latestSnapshot.v1");
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const [snapshot, setSnapshot] = useState(() => readSnapshot());
+  const [updatedAt, setUpdatedAt] = useState(() => new Date().toLocaleTimeString());
+
+  const refresh = () => {
+    setSnapshot(readSnapshot());
+    setUpdatedAt(new Date().toLocaleTimeString());
+  };
+
+  useEffect(() => {
+    const onStorage = (event) => {
+      if (event.key === "goldscope.latestSnapshot.v1") refresh();
+    };
+    window.addEventListener("storage", onStorage);
+    const timer = window.setInterval(() => {
+      const next = readSnapshot();
+      if (JSON.stringify(next?.tradeScenarioPlan || null) !== JSON.stringify(snapshot?.tradeScenarioPlan || null)) {
+        setSnapshot(next);
+        setUpdatedAt(new Date().toLocaleTimeString());
+      }
+    }, 4000);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.clearInterval(timer);
+    };
+  }, [snapshot]);
+
+  const plan = snapshot?.tradeScenarioPlan || {};
+  const primary = plan.primaryPlan || {};
+  const alternatives = Array.isArray(plan.alternativePlans) ? plan.alternativePlans : [];
+  const overlay = plan.fundamentalOverlay || {};
+  const technical = snapshot?.technicalContext || {};
+  const employment = snapshot?.employmentEvent || {};
+  const systemState = snapshot?.deterministicScenarioLab?.dominantScenario || snapshot?.scenario || "Wait-Neutral";
+
+  const fmt = (v) => {
+    if (Array.isArray(v)) return v.map(fmt).join(" → ");
+    if (v === null || v === undefined || v === "") return "n/a";
+    if (typeof v === "number" && Number.isFinite(v)) return String(Math.round(v));
+    return String(v);
+  };
+
+  const scenarioType = (scenario = {}) => {
+    const name = String(scenario.name || "").toLowerCase();
+    const type = String(scenario.type || "").toLowerCase();
+    if (type.includes("long") || name.includes("buy") || name.includes("bounce")) return "long";
+    if (type.includes("short") || name.includes("sell")) return "short";
+    return "neutral";
+  };
+
+  const scenarioMeta = (scenario = {}, idx = 0) => {
+    const type = scenarioType(scenario);
+    const primaryFlag = idx === -1;
+    const color = type === "long" ? C.green : type === "short" ? C.red : C.gold;
+    const bg = type === "long" ? "#052e1a66" : type === "short" ? "#3b0d0d66" : "#2b210966";
+    const icon = type === "long" ? "↗" : type === "short" ? "↘" : "◇";
+    return {
+      color,
+      bg,
+      icon,
+      tag: primaryFlag ? "Primary" : `Alt ${idx + 1}`,
+      border: primaryFlag ? `2px solid ${color}66` : `1px solid ${C.border}`,
+    };
+  };
+
+  const MetricBox = ({ label, value, color = C.text }) => (
+    <div style={{ background: "#050b14", border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 10px", textAlign: "center" }}>
+      <div style={{ color: C.muted, fontSize: 11, marginBottom: 6 }}>{label}</div>
+      <div style={{ color, fontSize: 13, fontWeight: 950, lineHeight: 1.35 }}>{value || "n/a"}</div>
+    </div>
+  );
+
+  const Targets = ({ scenario, color }) => {
+    const targets = Array.isArray(scenario?.takeProfit) ? scenario.takeProfit : [];
+    if (!targets.length) return null;
+    return (
+      <div style={{ marginTop: 16 }}>
+        <div style={{ color: C.muted, fontSize: 12, marginBottom: 8 }}>Targets</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {targets.map((target, i) => (
+            <span key={`${scenario.name || "scenario"}-tp-${i}`} style={{
+              background: i === targets.length - 1 ? `${color}18` : "#050b14",
+              border: `1px solid ${i === targets.length - 1 ? `${color}55` : C.border}`,
+              color: i === targets.length - 1 ? color : C.text,
+              borderRadius: 10,
+              padding: "7px 10px",
+              fontSize: 12,
+              fontWeight: 900,
+            }}>
+              {i === targets.length - 1 ? "Max" : `TP${i + 1}`}: {fmt(target)}
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const Sources = ({ scenario }) => {
+    const sources = scenario?.levelSources || {};
+    const renderSourceList = (label, items) => {
+      const list = Array.isArray(items) ? items : [];
+      if (!list.length) return null;
+      return (
+        <div style={{ marginTop: 8 }}>
+          <b style={{ color: C.muted, fontSize: 11 }}>{label}: </b>
+          <span style={{ color: C.muted, fontSize: 11, lineHeight: 1.55 }}>
+            {list.map((x) => `${x.source || "source"}${x.level !== undefined ? ` ${fmt(x.level)}` : ""}`).join("; ")}
+          </span>
+        </div>
+      );
+    };
+    return (
+      <div style={{ marginTop: 12 }}>
+        {renderSourceList("Entry source", sources.entryZone || sources.entryTrigger)}
+        {renderSourceList("Stop source", sources.stopLoss)}
+        {renderSourceList("Target source", sources.takeProfit)}
+      </div>
+    );
+  };
+
+  const ScenarioCard = ({ scenario, idx = 0, primaryFlag = false }) => {
+    const meta = scenarioMeta(scenario, primaryFlag ? -1 : idx);
+    const entry = scenario.entryZone ? fmt(scenario.entryZone) : scenario.entryTrigger || scenario.trigger || "trigger required";
+    const stop = scenario.stopLoss ? fmt(scenario.stopLoss) : "required";
+    const trigger = scenario.trigger || scenario.entryTrigger || scenario.validity || "Trigger confirmation required.";
+    const title = scenario.name || (primaryFlag ? "Primary scenario" : "Alternative scenario");
+
+    return (
+      <Card style={{ background: "#0b1220", border: meta.border, boxShadow: "0 18px 50px rgba(0,0,0,.25)", textAlign: "left" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "flex-start", marginBottom: 14 }}>
+          <div>
+            <span style={{ display: "inline-block", background: meta.bg, color: meta.color, border: `1px solid ${meta.color}44`, borderRadius: 9, padding: "5px 9px", fontSize: 11, fontWeight: 950 }}>
+              {meta.tag}
+            </span>
+            <h2 style={{ color: C.text, margin: "11px 0 0", fontSize: 19 }}>{title}</h2>
+          </div>
+          <div style={{ color: meta.color, background: meta.bg, borderRadius: 14, width: 44, height: 44, display: "grid", placeItems: "center", fontSize: 27, fontWeight: 950 }}>
+            {meta.icon}
+          </div>
+        </div>
+
+        <p style={{ color: C.muted, fontSize: 12, lineHeight: 1.75, minHeight: 42 }}>
+          {scenario.rationale || scenario.riskNote || scenario.validity || "This is conditional research only. Do not enter unless the trigger is confirmed."}
+        </p>
+
+        {scenario.riskNote && (
+          <div style={{ background: "#3b250666", border: "1px solid #92400e88", color: C.gold, borderRadius: 10, padding: "9px 10px", fontSize: 12, margin: "12px 0" }}>
+            ⚠️ {scenario.riskNote}
+          </div>
+        )}
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginTop: 14 }}>
+          <MetricBox label={scenario.entryZone ? "Entry zone" : "Entry trigger"} value={entry} color={meta.color} />
+          <MetricBox label="Stop loss" value={scenario.stopLoss ? (String(scenario.stopLoss).includes("below") ? scenario.stopLoss : fmt(scenario.stopLoss)) : "required"} />
+          <MetricBox label="Activation trigger" value={trigger} color={C.gold} />
+        </div>
+
+        {scenario.saferEntry && (
+          <div style={{ marginTop: 12, color: C.blue, fontSize: 12, lineHeight: 1.65 }}>
+            Safer entry: <b>{scenario.saferEntry}</b>
+          </div>
+        )}
+
+        <Targets scenario={scenario} color={meta.color} />
+        <Sources scenario={scenario} />
+      </Card>
+    );
+  };
+
+  if (!plan || !primary?.name) {
+    return (
+      <Card>
+        <Title icon="🧭" title="Trade Scenario Dashboard" sub="Dynamic panel from snapshot.tradeScenarioPlan" />
+        <p style={{ color: C.muted, lineHeight: 1.7 }}>
+          No tradeScenarioPlan found in the latest snapshot. Run AI Analysis / prompt builder once after v2.41.4+ so the snapshot can include deterministic trade scenarios.
+        </p>
+        <button style={{ background: C.gold, color: "#111827", border: 0, borderRadius: 10, padding: "9px 12px", fontWeight: 900 }} onClick={refresh}>Refresh snapshot</button>
+      </Card>
+    );
+  }
+
+  return (
+    <div style={{ direction: "ltr", textAlign: "left" }}>
+      <Card style={{ background: "#080d16", borderColor: C.border }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ background: `${C.gold}18`, color: C.gold, borderRadius: 12, padding: "8px 10px", fontSize: 20 }}>💎</span>
+              <div>
+                <h1 style={{ color: C.text, margin: 0, fontSize: 24 }}>GoldScope Trade Scenario Dashboard</h1>
+                <p style={{ color: C.muted, margin: "6px 0 0", fontSize: 13 }}>
+                  Dynamic Conditional Trade Scenario Plan · powered by snapshot.tradeScenarioPlan
+                </p>
+              </div>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, background: "#050b14", border: `1px solid ${C.border}`, borderRadius: 14, padding: "10px 12px" }}>
+            <span style={{ width: 10, height: 10, borderRadius: 99, background: C.gold, display: "inline-block" }} />
+            <span style={{ color: C.muted, fontSize: 12 }}>System state: <b style={{ color: C.gold }}>{String(systemState).replace(/_/g, "-")}</b></span>
+          </div>
+        </div>
+      </Card>
+
+      <Card style={{ background: "#0b1b36aa", borderColor: "#1d4ed866" }}>
+        <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+          <span style={{ color: C.blue, fontSize: 22 }}>ℹ️</span>
+          <div>
+            <h3 style={{ color: "#93c5fd", margin: 0, fontSize: 15 }}>Fundamental Overlay</h3>
+            <p style={{ color: C.muted, lineHeight: 1.75, marginBottom: 0, fontSize: 12 }}>
+              {overlay.reason || "Macro confirmation is incomplete; treat this as conditional research only."}
+              {" "}Confirmation required: {Array.isArray(overlay.confirmationRequired) ? overlay.confirmationRequired.join(", ") : "DXY, DGS10, DFII10, CPI, gold reaction"}.
+            </p>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+              <Badge value={overlay.employmentSignal || employment?.headline?.surpriseDirection || "employment unknown"}>
+                {overlay.employmentSignal || employment?.headline?.surpriseDirection || "employment unknown"}
+              </Badge>
+              <Badge value={overlay.employmentGoldImpact || employment?.quality?.goldImpact || "gold impact unknown"}>
+                {overlay.employmentGoldImpact || employment?.quality?.goldImpact || "gold impact unknown"}
+              </Badge>
+              <Badge value={overlay.cpiStatus || "CPI pending"}>{overlay.cpiStatus || "CPI pending"}</Badge>
+              <Badge value={technical?.selectedSource || technical?.sourceSymbol || "GC=F proxy"}>{technical?.selectedSource || technical?.sourceSymbol || "GC=F proxy"}</Badge>
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))", gap: 16 }}>
+        <ScenarioCard scenario={primary} primaryFlag />
+        {alternatives.map((scenario, idx) => (
+          <ScenarioCard key={`${scenario.name || "alt"}-${idx}`} scenario={scenario} idx={idx} />
+        ))}
+      </div>
+
+      <Card style={{ background: "#050b14", borderColor: C.border }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <p style={{ color: C.muted, margin: 0, fontSize: 12 }}>
+            These are approximate proxy levels from GC=F technical context, not exact spot XAUUSD levels.
+          </p>
+          <p style={{ color: C.gold, margin: 0, fontSize: 12, fontWeight: 950 }}>
+            Decision: {String(plan.decision || "do_not_force_trade_until_trigger").replace(/_/g, " ")}
+          </p>
+          <button onClick={refresh} style={{ background: `${C.gold}18`, color: C.gold, border: `1px solid ${C.gold}55`, borderRadius: 10, padding: "8px 11px", fontWeight: 900 }}>
+            Refresh · {updatedAt}
+          </button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+
+function readProductSnapshot() {
+  try {
+    const raw = localStorage.getItem("goldscope.latestSnapshot.v1");
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function getProductTechnicalFrame(snapshot) {
+  const tech = snapshot?.technicalContext || {};
+  const timeframes = tech?.timeframes || {};
+  const preferred = tech?.primaryTimeframe || "1h";
+  const key = timeframes[preferred] ? preferred : Object.keys(timeframes)[0];
+  const frame = key ? timeframes[key] : {};
+  return { tech, key: key || "snapshot", frame: frame || {} };
+}
+
+function getProductMarketSummary() {
+  const snapshot = readProductSnapshot();
+  const { tech, key, frame } = getProductTechnicalFrame(snapshot);
+  const plan = snapshot?.tradeScenarioPlan || {};
+  const price = Number(frame?.lastPrice ?? frame?.price ?? tech?.lastPrice ?? tech?.price ?? plan?.currentPrice);
+  const previous = Number(frame?.previousClose);
+  const change = Number.isFinite(price) && Number.isFinite(previous) && previous !== 0
+    ? ((price - previous) / previous) * 100
+    : null;
+  const atr = Number(frame?.atr14 ?? frame?.volatility?.atr14);
+  const trend = frame?.trend || tech?.bias || frame?.strategy?.aggregateBias || plan?.dominantBias || "unknown";
+  const volume = Number(frame?.volume ?? frame?.lastVolume);
+  return {
+    snapshot,
+    timeframe: key,
+    price: Number.isFinite(price) ? price : null,
+    change24h: Number.isFinite(change) ? change : null,
+    volatility: Number.isFinite(atr) ? atr : null,
+    trend,
+    volume: Number.isFinite(volume) ? volume : null,
+    updatedAt: snapshot?.createdAt || snapshot?.lastUpdated || tech?.lastUpdated || "",
+  };
+}
+
+const productTokens = {
+  colors: {
+    primary: "#D4AF37",
+    primarySoft: "#F5E6B3",
+    bgLight: "#F7F8FA",
+    bgDark: "#0B1120",
+    surfaceLight: "#FFFFFF",
+    surfaceDark: "#111827",
+    textPrimaryLight: "#111827",
+    textSecondaryLight: "#6B7280",
+    textPrimaryDark: "#F9FAFB",
+    textSecondaryDark: "#9CA3AF",
+    success: "#16A34A",
+    danger: "#DC2626",
+    border: "#E5E7EB",
+  },
+  spacing: { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, "2xl": 32 },
+  radius: { sm: 6, md: 10, lg: 16, full: 999 },
+};
+
+function ProductHero({ title, subtitle, actions }) {
+  return (
+    <div style={{
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 18,
+      flexWrap: "wrap",
+      marginBottom: 18,
+    }}>
+      <div>
+        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900, letterSpacing: -0.5 }}>{title}</h1>
+        {subtitle && <p style={{ color: C.muted, margin: "7px 0 0", lineHeight: 1.65 }}>{subtitle}</p>}
+      </div>
+      {actions && <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>{actions}</div>}
+    </div>
+  );
+}
+
+function ProductTimeRangeTabs({ value, onChange }) {
+  const ranges = ["1D", "1W", "1M", "1Y", "All", "Custom"];
+  return (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      {ranges.map((r) => (
+        <button
+          key={r}
+          onClick={() => onChange(r)}
+          style={{
+            background: value === r ? C.gold : C.card2,
+            color: value === r ? "#111827" : C.text,
+            border: `1px solid ${value === r ? C.gold : C.border}`,
+            borderRadius: 999,
+            padding: "7px 11px",
+            fontWeight: 900,
+            cursor: "pointer",
+          }}
+        >
+          {r}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ProductMiniSparkline({ label = "Series", values = [] }) {
+  const data = values.length ? values : [12, 14, 13, 18, 21, 19, 24, 26, 23, 29, 31, 28, 33];
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const points = data.map((v, i) => {
+    const x = (i / Math.max(1, data.length - 1)) * 100;
+    const y = 40 - ((v - min) / Math.max(1, max - min)) * 32 + 4;
+    return `${x},${y}`;
+  }).join(" ");
+  return (
+    <div>
+      <div style={{ color: C.muted, fontSize: 12, marginBottom: 8 }}>{label}</div>
+      <svg viewBox="0 0 100 48" width="100%" height="92" style={{ background: "#050b14", border: `1px solid ${C.border}`, borderRadius: 12 }}>
+        <polyline points={points} fill="none" stroke={C.gold} strokeWidth="2.2" />
+        <line x1="0" y1="40" x2="100" y2="40" stroke={C.border} strokeWidth="1" />
+      </svg>
+    </div>
+  );
+}
+
+function ProductSummaryCards() {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setTick((x) => x + 1), 5000);
+    return () => clearInterval(timer);
+  }, []);
+  const summary = getProductMarketSummary();
+  const items = [
+    {
+      label: "Current Price",
+      value: summary.price !== null ? `$${summary.price.toFixed(1)}` : "n/a",
+      sub: summary.timeframe ? `Timeframe: ${summary.timeframe}` : "Snapshot unavailable",
+      accent: productTokens.colors.primary,
+    },
+    {
+      label: "24h Change",
+      value: summary.change24h !== null ? `${summary.change24h >= 0 ? "+" : ""}${summary.change24h.toFixed(2)}%` : "n/a",
+      sub: "From snapshot previous close",
+      accent: summary.change24h >= 0 ? productTokens.colors.success : productTokens.colors.danger,
+    },
+    {
+      label: "Volatility",
+      value: summary.volatility !== null ? summary.volatility.toFixed(1) : "n/a",
+      sub: "ATR14 / snapshot volatility",
+      accent: "#F97316",
+    },
+    {
+      label: "Trend",
+      value: String(summary.trend || "unknown").replace(/_/g, " "),
+      sub: summary.updatedAt ? `Updated: ${safeDate(summary.updatedAt)}` : "Latest snapshot",
+      accent: productTokens.colors.primary,
+    },
+  ];
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14 }}>
+      {items.map((item) => (
+        <Card key={item.label} style={{ background: C.card2 }}>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 8, fontWeight: 850 }}>{item.label}</div>
+          <div style={{ fontSize: 25, fontWeight: 950, color: C.text, textTransform: item.label === "Trend" ? "capitalize" : "none" }}>{item.value}</div>
+          <div style={{ color: C.muted, fontSize: 12, marginTop: 8 }}>{item.sub}</div>
+          <div style={{ marginTop: 10, width: 38, height: 4, borderRadius: 999, background: item.accent }} />
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function ProductDashboardPage() {
+  const [range, setRange] = useState("1M");
+  const summary = getProductMarketSummary();
+
+  return (
+    <div>
+      <ProductHero
+        title="Dashboard"
+        subtitle="Market status, key summary cards, price chart, and secondary insights."
+        actions={
+          <>
+            <button style={btn(false)} onClick={() => { refreshFred(); refreshGdelt(); }}>Refresh macro/news</button>
+            <button style={btn(false)} onClick={() => setActive("analytics")}>Open Analytics</button>
+            <button style={btn(false)} onClick={() => setActive("aiEngine")}>Open AI Analysis</button>
+          </>
+        }
+      />
+      <ProductSummaryCards />
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.5fr) minmax(300px, .7fr)", gap: 16, marginTop: 16 }}>
+        <Card>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+            <Title icon="📈" title="Main Price Chart" sub="TradingView OANDA:XAUUSD for the current product shell." />
+            <ProductTimeRangeTabs value={range} onChange={setRange} />
+          </div>
+          <TradingViewChart />
+        </Card>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <Card>
+            <Title icon="🌊" title="Volatility" sub="Snapshot ATR/volatility proxy." />
+            <ProductMiniSparkline label={`ATR snapshot · ${summary.volatility !== null ? summary.volatility.toFixed(1) : "n/a"}`} />
+          </Card>
+          <Card>
+            <Title icon="🧭" title="Trend / Regime" sub="Derived from the latest technical snapshot." />
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Badge value={String(summary.trend || "unknown")}>{String(summary.trend || "unknown").replace(/_/g, " ")}</Badge>
+              <Badge value={summary.change24h >= 0 ? "supportive" : "negative"}>{summary.change24h !== null ? `${summary.change24h.toFixed(2)}%` : "change n/a"}</Badge>
+            </div>
+            <p style={{ color: C.muted, lineHeight: 1.65 }}>
+              Use Analytics for return, drawdown, technical panels, and conditional scenario planning.
+            </p>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProductAnalyticsPage() {
+  const [range, setRange] = useState("1M");
+  const summary = getProductMarketSummary();
+  const mockReturns = [0, 1.2, -0.4, 2.1, 1.5, -1.1, 0.6, 2.4, -0.8, 1.9, 0.7, -0.2, 1.1];
+  const mockVol = [2.4, 2.9, 3.1, 2.8, 3.6, 4.1, 3.7, 3.2, 3.4, 3.1, 3.8, 4.0];
+  const mockDrawdown = [0, -0.5, -1.2, -0.8, -2.4, -3.1, -1.9, -1.1, -2.8, -1.4, -0.6];
+
+  return (
+    <div>
+      <ProductHero
+        title="Analytics"
+        subtitle="Time range filters, return / volatility / drawdown cards, technical context, and conditional trade scenarios."
+        actions={<ProductTimeRangeTabs value={range} onChange={setRange} />}
+      />
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 14, marginBottom: 16 }}>
+        <Card style={{ background: C.card2 }}>
+          <Title icon="↗️" title="Return" sub={`Range: ${range}`} />
+          <ProductMiniSparkline label="Return path" values={mockReturns} />
+        </Card>
+        <Card style={{ background: C.card2 }}>
+          <Title icon="🌊" title="Volatility" sub="ATR / realized proxy" />
+          <ProductMiniSparkline label={summary.volatility !== null ? `Current volatility: ${summary.volatility.toFixed(1)}` : "Volatility proxy"} values={mockVol} />
+        </Card>
+        <Card style={{ background: C.card2 }}>
+          <Title icon="📉" title="Drawdown" sub="Risk visualization placeholder" />
+          <ProductMiniSparkline label="Drawdown profile" values={mockDrawdown} />
+        </Card>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
+        <TechnicalDashboardPanel />
+        <TradeScenarioDashboardPanel />
+      </div>
+    </div>
+  );
+}
+
+function ProductAlertsPage() {
+  const loadAlerts = () => {
+    try {
+      const raw = localStorage.getItem("goldscope.priceAlerts.v1");
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const [alerts, setAlerts] = useState(loadAlerts);
+  const [form, setForm] = useState({ level: "", condition: "above", channel: "in-app", note: "" });
+  const summary = getProductMarketSummary();
+
+  const saveAlerts = (next) => {
+    setAlerts(next);
+    try { localStorage.setItem("goldscope.priceAlerts.v1", JSON.stringify(next)); } catch {}
+  };
+
+  const addAlert = () => {
+    const level = Number(form.level);
+    if (!Number.isFinite(level)) return;
+    const current = summary.price;
+    const triggered = Number.isFinite(current) && ((form.condition === "above" && current >= level) || (form.condition === "below" && current <= level));
+    const next = [{
+      id: `alert-${Date.now()}`,
+      symbol: "XAUUSD",
+      level,
+      condition: form.condition,
+      channel: form.channel,
+      note: form.note,
+      status: triggered ? "Triggered" : "Active",
+      createdAt: new Date().toISOString(),
+    }, ...alerts];
+    saveAlerts(next);
+    setForm({ level: "", condition: "above", channel: "in-app", note: "" });
+  };
+
+  const updateStatus = (id, status) => saveAlerts(alerts.map((a) => a.id === id ? { ...a, status } : a));
+  const removeAlert = (id) => saveAlerts(alerts.filter((a) => a.id !== id));
+  const inputStyle = { background: C.card2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", width: "100%", boxSizing: "border-box" };
+
+  return (
+    <div>
+      <ProductHero title="Alerts" subtitle="Create local research alerts for price levels. Browser-local only; no broker orders." />
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(300px, .7fr) minmax(0, 1.3fr)", gap: 16 }}>
+        <Card>
+          <Title icon="🔔" title="New Alert" sub="Create a browser-local price alert." />
+          <div style={{ display: "grid", gap: 12 }}>
+            <div><label style={{ color: C.muted, fontSize: 12, fontWeight: 850 }}>Price level</label><input style={inputStyle} value={form.level} onChange={(e) => setForm((f) => ({ ...f, level: e.target.value }))} placeholder="e.g., 4455" /></div>
+            <div><label style={{ color: C.muted, fontSize: 12, fontWeight: 850 }}>Condition</label><select style={inputStyle} value={form.condition} onChange={(e) => setForm((f) => ({ ...f, condition: e.target.value }))}><option value="above">Price above</option><option value="below">Price below</option></select></div>
+            <div><label style={{ color: C.muted, fontSize: 12, fontWeight: 850 }}>Notification channel</label><select style={inputStyle} value={form.channel} onChange={(e) => setForm((f) => ({ ...f, channel: e.target.value }))}><option value="in-app">In-app</option><option value="email-placeholder">Email placeholder</option><option value="webhook-placeholder">Webhook placeholder</option></select></div>
+            <div><label style={{ color: C.muted, fontSize: 12, fontWeight: 850 }}>Note</label><input style={inputStyle} value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} placeholder="Optional reason or scenario" /></div>
+            <button style={btn(false)} onClick={addAlert}>Save alert</button>
+          </div>
+        </Card>
+
+        <Card>
+          <Title icon="📋" title="Alert Table" sub="Active / Triggered / Paused local alerts." />
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead><tr style={{ color: C.muted, textAlign: "left" }}>
+                <th style={{ padding: 10, borderBottom: `1px solid ${C.border}` }}>Symbol</th>
+                <th style={{ padding: 10, borderBottom: `1px solid ${C.border}` }}>Condition</th>
+                <th style={{ padding: 10, borderBottom: `1px solid ${C.border}` }}>Level</th>
+                <th style={{ padding: 10, borderBottom: `1px solid ${C.border}` }}>Status</th>
+                <th style={{ padding: 10, borderBottom: `1px solid ${C.border}` }}>Channel</th>
+                <th style={{ padding: 10, borderBottom: `1px solid ${C.border}` }}>Actions</th>
+              </tr></thead>
+              <tbody>
+                {alerts.length === 0 ? (
+                  <tr><td colSpan="6" style={{ padding: 16, color: C.muted }}>No alerts yet.</td></tr>
+                ) : alerts.map((a) => (
+                  <tr key={a.id}>
+                    <td style={{ padding: 10, borderBottom: `1px solid ${C.border}` }}>{a.symbol}</td>
+                    <td style={{ padding: 10, borderBottom: `1px solid ${C.border}` }}>{a.condition}</td>
+                    <td style={{ padding: 10, borderBottom: `1px solid ${C.border}` }}>{a.level}</td>
+                    <td style={{ padding: 10, borderBottom: `1px solid ${C.border}` }}><Badge value={a.status === "Triggered" ? "negative" : a.status === "Paused" ? "warning" : "supportive"}>{a.status}</Badge></td>
+                    <td style={{ padding: 10, borderBottom: `1px solid ${C.border}` }}>{a.channel}</td>
+                    <td style={{ padding: 10, borderBottom: `1px solid ${C.border}` }}>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <button style={btn(false)} onClick={() => updateStatus(a.id, a.status === "Paused" ? "Active" : "Paused")}>{a.status === "Paused" ? "Resume" : "Pause"}</button>
+                        <button style={btn(false)} onClick={() => removeAlert(a.id)}>Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function ProductSettingsPage() {
+  const [themeMode, setThemeMode] = useState(() => { try { return localStorage.getItem("goldscope.productTheme.v1") || "dark"; } catch { return "dark"; } });
+  const [currency, setCurrency] = useState(() => { try { return localStorage.getItem("goldscope.currency.v1") || "USD"; } catch { return "USD"; } });
+  const [language, setLanguage] = useState(() => { try { return localStorage.getItem("goldscope.language.v1") || "English"; } catch { return "English"; } });
+  const [notifications, setNotifications] = useState(() => { try { return localStorage.getItem("goldscope.notifications.v1") || "in-app"; } catch { return "in-app"; } });
+
+  const persist = (key, value, setter) => {
+    setter(value);
+    try { localStorage.setItem(key, value); } catch {}
+  };
+  const inputStyle = { background: C.card2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", width: "100%", boxSizing: "border-box" };
+
+  return (
+    <div>
+      <ProductHero title="Settings" subtitle="Product preferences plus existing GoldScope research configuration." />
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(300px, .75fr) minmax(0, 1.25fr)", gap: 16 }}>
+        <Card>
+          <Title icon="🎛️" title="Product Preferences" sub="Local UI preferences for the product shell." />
+          <div style={{ display: "grid", gap: 12 }}>
+            <div><label style={{ color: C.muted, fontSize: 12, fontWeight: 850 }}>Currency</label><select style={inputStyle} value={currency} onChange={(e) => persist("goldscope.currency.v1", e.target.value, setCurrency)}><option>USD</option><option>CAD</option><option>EUR</option></select></div>
+            <div><label style={{ color: C.muted, fontSize: 12, fontWeight: 850 }}>Language</label><select style={inputStyle} value={language} onChange={(e) => persist("goldscope.language.v1", e.target.value, setLanguage)}><option>English</option><option>Persian</option></select></div>
+            <div><label style={{ color: C.muted, fontSize: 12, fontWeight: 850 }}>Theme</label><select style={inputStyle} value={themeMode} onChange={(e) => persist("goldscope.productTheme.v1", e.target.value, setThemeMode)}><option value="dark">Dark</option><option value="light">Light placeholder</option></select></div>
+            <div><label style={{ color: C.muted, fontSize: 12, fontWeight: 850 }}>Notifications</label><select style={inputStyle} value={notifications} onChange={(e) => persist("goldscope.notifications.v1", e.target.value, setNotifications)}><option value="in-app">In-app</option><option value="email-placeholder">Email placeholder</option><option value="webhook-placeholder">Webhook placeholder</option></select></div>
+          </div>
+        </Card>
+        <Settings />
+      </div>
+      <Card style={{ marginTop: 16 }}>
+        <Title icon="🎨" title="GoldScope Design Tokens" sub="Internal product design system reference." />
+        <pre style={{ whiteSpace: "pre-wrap", background: "#050b14", border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, color: C.muted, fontSize: 12, overflowX: "auto" }}>
+{JSON.stringify(productTokens, null, 2)}
+        </pre>
+      </Card>
+    </div>
+  );
+}
+
 
 function Overview() {
     return (
@@ -11216,6 +12043,8 @@ function mergeEventResultWithCalendarImport(event, result = {}) {
       usedForecast: !result?.forecast && !event?.forecast && !!calendarImport.forecast,
       usedPrevious: !result?.previous && !event?.previous && !!calendarImport.previous,
     },
+    sectorCompositionText: result?.sectorCompositionText || event?.sectorCompositionText || "",
+    notes: result?.notes || event?.notes || "",
     source: result?.source || event?.source || calendarImport.source || "Calendar forecast/previous import",
   };
 }
@@ -11386,16 +12215,29 @@ function parseSectorCompositionText(text) {
 }
 
 function blsEmploymentSituationParser(event, result = {}) {
-  const detailsText = [result?.sectorCompositionText, result?.notes, event?.notes].filter(Boolean).join("\n");
-  const sectors = parseSectorCompositionText(detailsText);
+  const rawSectorCompositionText = String(result?.sectorCompositionText || event?.sectorCompositionText || "").trim();
+  const rawNotes = String(result?.notes || event?.notes || "").trim();
+
+  // Important data-path rule:
+  // sectorCompositionText is the authoritative input for BLS sector parsing.
+  // Notes may contain context, but should not silently make the parser look executed
+  // when the dedicated field is empty.
+  const parserInput = rawSectorCompositionText || "";
+  const sectors = parseSectorCompositionText(parserInput);
+
+  let parserStatus = "sectorCompositionText_missing";
+  if (rawSectorCompositionText && !sectors.length) parserStatus = "sector_text_present_but_unparsed";
+  if (rawSectorCompositionText && sectors.length) parserStatus = "parsed_from_sectorCompositionText";
 
   return {
     unemploymentRate: String(result?.unemploymentRate || event?.unemploymentRate || "").trim(),
     averageHourlyEarningsMoM: String(result?.averageHourlyEarningsMoM || result?.averageHourlyEarnings || event?.averageHourlyEarningsMoM || "").trim(),
     averageHourlyEarningsYoY: String(result?.averageHourlyEarningsYoY || event?.averageHourlyEarningsYoY || "").trim(),
+    sectorCompositionText: rawSectorCompositionText,
+    sectorCompositionNotes: rawNotes,
     sectorBreakdown: sectors,
-    source: sectors.length ? "event result notes / sector composition text" : "not_available",
-    parserStatus: sectors.length ? "parsed_from_text" : "sector_breakdown_missing",
+    source: sectors.length ? "sectorCompositionText" : "not_available",
+    parserStatus,
   };
 }
 
@@ -11794,6 +12636,7 @@ function buildEmploymentEventIntelligence(calendarEvents, eventResults, replayEv
       breadth: composition.breadth,
       compositionSignal: composition.compositionSignal,
       laborQualitySignal: composition.laborQualitySignal,
+      sectorCompositionText: details.sectorCompositionText || "",
       sectorBreakdown: composition.sectorBreakdown,
       sectorBreadthStats: composition.sectorBreadthStats,
       parserStatus: details.parserStatus,
@@ -11856,6 +12699,8 @@ Details:
 - compositionSignal=${e.details?.compositionSignal || e.quality?.compositionSignal || "composition_not_verified"}
 - laborQualitySignal=${e.details?.laborQualitySignal || e.quality?.laborQualitySignal || "not_verified"}
 - sectorCompositionSource=${e.details?.sectorCompositionSource || "not_available"}
+- sectorParserStatus=${e.details?.parserStatus || "unknown"}
+- sectorCompositionTextAvailable=${e.details?.sectorCompositionText ? "yes" : "no"}
 Sector breakdown:
 ${sectors}
 Quality:
@@ -11871,6 +12716,202 @@ Guardrail: Do not treat headline NFP as uniformly hawkish/dovish until sector co
 }
 
 
+
+function normalizeCalendarRiskForFundamental(calendarRows = [], scenario = {}) {
+  const rows = Array.isArray(calendarRows) ? calendarRows : [];
+  const next = scenario?.nextMajor || rows.find((e) => e?.isNextMajor || e?.importance === "high" || e?.importance === "High") || rows[0] || {};
+  const name = next?.event || next?.name || next?.title || scenario?.nextMajor?.name || scenario?.nextMajor || "unknown";
+  const actual = next?.actual ?? next?.eventActual ?? null;
+  const forecast = next?.forecast ?? next?.eventForecast ?? null;
+  const previous = next?.previous ?? next?.eventPrevious ?? null;
+  const status = actual || forecast || previous
+    ? "actual_forecast_previous_context"
+    : name && name !== "unknown"
+      ? "date_only"
+      : "missing";
+
+  return {
+    nextMajor: typeof name === "string" ? name : (name?.name || name?.event || "unknown"),
+    eventDate: next?.date || next?.datetime || next?.releaseTime || "",
+    eventType: next?.type || next?.category || "",
+    importance: next?.importance || next?.impact || "",
+    status,
+    actual,
+    forecast,
+    previous,
+    avoidWindow: "Avoid new entries 2h before and 1h after release",
+    source: next?.source || "calendar",
+  };
+}
+
+function buildEventForecastsForFundamental(calendarRisk, employmentEvent) {
+  const h = employmentEvent?.headline || {};
+  return {
+    nfp: {
+      actual: h.actual || null,
+      forecast: h.forecast || null,
+      previous: h.previous || null,
+      actualK: h.actualK ?? null,
+      forecastK: h.forecastK ?? null,
+      previousK: h.previousK ?? null,
+      surpriseK: h.surpriseK ?? null,
+      surpriseDirection: h.surpriseDirection || "unknown",
+      status: employmentEvent?.status || "unknown",
+    },
+    cpi: {
+      actual: calendarRisk?.actual ?? null,
+      forecast: calendarRisk?.forecast ?? null,
+      previous: calendarRisk?.previous ?? null,
+      status: calendarRisk?.status || "unknown",
+      nextMajor: calendarRisk?.nextMajor || "unknown",
+    },
+  };
+}
+
+function normalizeReplayForFundamental(replayCompact = []) {
+  const rows = Array.isArray(replayCompact) ? replayCompact : [];
+  const latest = rows[0] || {};
+  const alignment = latest?.alignment || latest?.reactionAlignment || (rows.length ? "inconclusive" : "missing");
+  return {
+    recordCount: rows.length,
+    observedReaction: latest?.observedReaction || latest?.goldReaction || "",
+    alignment,
+    reliability: rows.length >= 5 ? "stronger" : rows.length > 0 ? "limited" : "missing",
+  };
+}
+
+function buildFundamentalScenariosForSnapshot({ scenario, calendarRisk, employmentEvent, replayEvidence }) {
+  const h = employmentEvent?.headline || {};
+  const q = employmentEvent?.quality || {};
+  const employmentStrong = h.surpriseDirection === "stronger_than_expected";
+  const employmentWeak = h.surpriseDirection === "weaker_than_expected";
+  const cpiMissing = calendarRisk?.status === "date_only" || !calendarRisk?.actual;
+
+  return {
+    bullish: {
+      drivers: [
+        "real yields fall",
+        "USD weakens",
+        "CPI is hot but real yields fall",
+        employmentWeak ? "labor data weakens" : "",
+      ].filter(Boolean),
+      missingEvidence: [
+        cpiMissing ? "CPI actual/forecast" : "",
+        "DXY reaction",
+        "DGS10/DFII10 reaction",
+        "gold post-event reaction",
+      ].filter(Boolean),
+      invalidation: "If stronger labor/inflation data lifts USD and real yields, the bullish case weakens.",
+    },
+    bearish: {
+      drivers: [
+        employmentStrong ? "NFP headline beat" : "",
+        q.goldImpact || employmentEvent?.quality?.goldImpact || "",
+        "USD/yields rise",
+        "real yields rise",
+      ].filter(Boolean),
+      missingEvidence: [
+        employmentEvent?.details?.compositionSignal === "composition_verified" ? "" : "employment sector composition",
+        "wage pressure",
+        "USD/yields confirmation",
+        cpiMissing ? "CPI actual/forecast" : "",
+      ].filter(Boolean),
+      invalidation: "If USD/yields fail to confirm the labor signal or CPI/real-yield reaction turns gold-supportive, the bearish case weakens.",
+    },
+    wait: {
+      reason: "macro/technical conflict plus incomplete CPI and employment-quality confirmation",
+      drivers: [
+        "macro/technical conflict",
+        cpiMissing ? "CPI date-only" : "",
+        replayEvidence?.alignment === "inconclusive" ? "replay inconclusive" : "",
+        employmentEvent?.details?.compositionSignal === "composition_verified" ? "" : "employment composition not verified",
+      ].filter(Boolean),
+    },
+  };
+}
+
+function buildFundamentalContext(snapshotDraft, scenario, fredCompact, replayCompact) {
+  const calendarRows = snapshotDraft?.calendar || [];
+  const employmentEvent = snapshotDraft?.employmentEvent || {};
+  const calendarRisk = normalizeCalendarRiskForFundamental(calendarRows, scenario);
+  const eventForecasts = buildEventForecastsForFundamental(calendarRisk, employmentEvent);
+  const replayEvidence = normalizeReplayForFundamental(replayCompact);
+  const h = employmentEvent?.headline || {};
+  const q = employmentEvent?.quality || {};
+  const d = employmentEvent?.details || {};
+  const contextQuality = snapshotDraft?.contextQualityFlags || {};
+
+  const missingEvidence = [
+    calendarRisk?.status === "date_only" ? "CPI actual/forecast" : "",
+    d?.compositionSignal === "composition_verified" ? "" : "employment sector composition",
+    "wage pressure",
+    "USD/yields confirmation",
+    replayEvidence?.alignment === "inconclusive" || replayEvidence?.alignment === "missing" ? "replay alignment" : "",
+  ].filter(Boolean);
+
+  const confirmationRequired = [
+    "CPI actual/forecast",
+    "DXY reaction",
+    "DGS10 reaction",
+    "DFII10 reaction",
+    "employment sector composition",
+    "wage pressure",
+    "gold post-event reaction",
+    "replay alignment",
+  ];
+
+  const macroBias = scenario?.macroDirection || scenario?.dominant || "mixed";
+  const fundamentalBias =
+    macroBias === "supportive" && snapshotDraft?.technicalContext?.technicalBias === "bearish"
+      ? "mixed_wait_neutral"
+      : missingEvidence.length
+        ? "conditional_wait_neutral"
+        : String(macroBias || "mixed");
+
+  return {
+    status: "available",
+    macroBias,
+    macroReliability: contextQuality?.macroReliability || contextQuality?.fredReliability || "partial",
+    macroScore: scenario?.scores?.macro ?? null,
+    calendarRisk,
+    nextMajorEvent: calendarRisk?.nextMajor || "unknown",
+    eventForecasts,
+    employment: {
+      actual: h.actual || null,
+      forecast: h.forecast || null,
+      previous: h.previous || null,
+      actualK: h.actualK ?? null,
+      forecastK: h.forecastK ?? null,
+      previousK: h.previousK ?? null,
+      surpriseK: h.surpriseK ?? null,
+      surpriseDirection: h.surpriseDirection || "unknown",
+      unemploymentRate: d.unemploymentRate || null,
+      sectorComposition: d.compositionSignal === "composition_verified" ? d.sectorConcentration : "not_verified",
+      compositionSignal: d.compositionSignal || q.compositionSignal || "composition_not_verified",
+      laborQualitySignal: d.laborQualitySignal || q.laborQualitySignal || "not_verified",
+      goldImpact: q.goldImpact || "wait_for_confirmation",
+      confirmationRequired: q.confirmationRequired || [],
+    },
+    replayEvidence,
+    fundamentalScenarios: buildFundamentalScenariosForSnapshot({ scenario, calendarRisk, employmentEvent, replayEvidence }),
+    fundamentalBias,
+    confidenceCaps: {
+      maxRecommendedConfidence: snapshotDraft?.deterministicScenarioLab?.confidence ?? null,
+      reason: missingEvidence.length
+        ? "Directional confidence remains capped because key fundamental confirmation evidence is incomplete."
+        : "Fundamental confirmation is more complete, but market reaction confirmation is still required.",
+    },
+    missingEvidence,
+    confirmationRequired,
+    sourceTrace: {
+      fredRows: Array.isArray(fredCompact) ? fredCompact.length : 0,
+      calendarEvents: Array.isArray(calendarRows) ? calendarRows.length : 0,
+      replayRecords: Array.isArray(replayCompact) ? replayCompact.length : 0,
+      employmentStatus: employmentEvent?.status || "unknown",
+    },
+  };
+}
+
 function buildGoldScopeContextSnapshot() {
       const scenario = buildScenarioModel();
       const fredCompact = compactFredRows();
@@ -11882,7 +12923,7 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.41.5.2",
+        appVersion: "GoldScope v2.41.6.2",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -11916,6 +12957,7 @@ function buildGoldScopeContextSnapshot() {
           ollamaStatus,
         },
       };
+      snapshot.fundamentalContext = buildFundamentalContext(snapshot, scenario, fredCompact, replayCompact);
       snapshot.tradeScenarioPlan = buildGoldTradeScenarioPlan(snapshot);
       setContextSnapshot(snapshot);
       return snapshot;
@@ -14810,6 +15852,9 @@ ${technicalConfirmationText}
 
 ${employmentEventFacts}
 
+FUNDAMENTAL INTELLIGENCE CONTEXT — STRUCTURED ENGINE OUTPUT:
+${JSON.stringify(snapshot.fundamentalContext || {}, null, 2)}
+
 GOLDSCOPE STATE SNAPSHOT:
 ${safeCompact(snapshot)}
 
@@ -15196,7 +16241,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.5.2",
+        appVersion: "GoldScope v2.41.6.2",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -15549,7 +16594,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.5.2",
+        appVersion: "GoldScope v2.41.6.2",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -15752,8 +16797,8 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.5.2",
-        prototypeBoundary: "Local browser prototype. Jobs/replay should move to BI/DataOps for production.",
+        appVersion: "GoldScope v2.41.6.2",
+        prototypeBoundary: "Product UX shell over local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
 
@@ -16012,10 +17057,14 @@ ${err.stack || err.message || String(err)}`);
   }
 
   const views = {
+    dashboard: <ProductDashboardPage />,
+    analytics: <ProductAnalyticsPage />,
+    alerts: <ProductAlertsPage />,
     control: <ControlCenter />,
     overview: <Overview />,
     chart: <TradingViewChart />,
     technical: <TechnicalDashboardPanel />,
+    tradePlan: <TradeScenarioDashboardPanel />,
     news: <NewsPanel />,
     macro: <MacroDrivers />,
     calendar: <Calendar />,
@@ -16029,7 +17078,8 @@ ${err.stack || err.message || String(err)}`);
     aiEngine: <AIScenarioEngine />,
     health: <SourceHealth />,
     export: <ExportAndBIMigration />,
-    settings: <Settings />,
+    settings: <ProductSettingsPage />,
+    advancedSettings: <Settings />,
   };
 
   return (
@@ -16047,7 +17097,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.5.2</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.6.2</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
