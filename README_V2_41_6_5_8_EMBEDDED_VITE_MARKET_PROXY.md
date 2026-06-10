@@ -1,4 +1,4 @@
-# GoldScope v2.41.6.5.8 - Embedded Vite Market Proxy
+# GoldScope v2.41.6.5.9 - Embedded Vite Market Proxy
 
 Problem:
 The app depended on a separate market proxy at `http://localhost:8787`. If that process was not running, Technical Context failed with:

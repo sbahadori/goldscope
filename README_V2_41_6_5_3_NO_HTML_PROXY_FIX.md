@@ -1,4 +1,4 @@
-# GoldScope v2.41.6.5.3 - No HTML Proxy Fix
+# GoldScope v2.41.6.5.9 - No HTML Proxy Fix
 
 Root cause:
 The app was still checking Ollama through `/api/ollama`. If Vite did not proxy that path, Vite returned React HTML, producing:

@@ -1,5 +1,5 @@
 /**
- * GoldScope Market Proxy v2.41.6.5.5
+ * GoldScope Market Proxy v2.41.6.5.9
  *
  * Scope fix:
  * - Do NOT proxy all /api routes.
@@ -277,9 +277,12 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, {
         ok: true,
         name: "GoldScope Market Proxy",
-        version: "v2.41.6.5.5",
+        version: "v2.41.6.5.9",
         oandaEnv: OANDA_ENV,
         oandaConfigured: Boolean(TOKEN && ACCOUNT_ID),
+        oandaCandlesOk: null,
+        oandaPricingOk: null,
+        oandaHealthNote: "Detailed OANDA probe is available in embedded Vite proxy health route.",
         credentialsFile: LOCAL_SECRETS_PATH,
         credentialsFileLoaded: Boolean(Object.keys(LOCAL_CREDS).length),
         scope: "market-only",
@@ -313,14 +316,14 @@ const server = http.createServer(async (req, res) => {
     json(res, 502, {
       error: error.message || String(error),
       proxy: "GoldScope Market Proxy",
-      version: "v2.41.6.5.5",
+      version: "v2.41.6.5.9",
     });
   }
 });
 
 server.listen(PORT, () => {
   console.log(`[GoldScope Market Proxy] listening on http://localhost:${PORT}`);
-  console.log(`[GoldScope Market Proxy] version=v2.41.6.5.5 scope=market-only`);
+  console.log(`[GoldScope Market Proxy] version=v2.41.6.5.9 scope=market-only`);
   console.log(`[GoldScope Market Proxy] OANDA env=${OANDA_ENV} configured=${Boolean(TOKEN && ACCOUNT_ID)}`);
   console.log(`[GoldScope Market Proxy] credentials file=${LOCAL_SECRETS_PATH} loaded=${Boolean(Object.keys(LOCAL_CREDS).length)}`);
 });

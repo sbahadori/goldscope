@@ -1,4 +1,4 @@
-# GoldScope v2.41.6.5.5 - Local Secrets File Support
+# GoldScope v2.41.6.5.9 - Local Secrets File Support
 
 Purpose:
 Allow the market proxy to read OANDA credentials from:

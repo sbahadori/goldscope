@@ -1,7 +1,7 @@
-# GoldScope v2.41.6.5.2 - Proxy Scope + Upstream Fallback Fix
+# GoldScope v2.41.6.5.9 - Proxy Scope + Upstream Fallback Fix
 
 Problem:
-v2.41.6.5.1 proxied all `/api/*` traffic to the market proxy. That could break unrelated internal routes such as Ollama/internal proxy.
+v2.41.6.5.9 proxied all `/api/*` traffic to the market proxy. That could break unrelated internal routes such as Ollama/internal proxy.
 
 Fix:
 - Vite now proxies only:

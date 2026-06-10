@@ -1,4 +1,4 @@
-# GoldScope v2.41.6.5.4 - Market Proxy Health + Start Fix
+# GoldScope v2.41.6.5.9 - Market Proxy Health + Start Fix
 
 Root cause of the latest error:
 If OANDA, Yahoo, GC=F, and Stooq all return HTTP 502 at the same time, the usual cause is not indicator logic. It usually means the market proxy is not running or Vite is not reaching it.

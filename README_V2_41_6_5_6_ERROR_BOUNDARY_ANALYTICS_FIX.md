@@ -1,4 +1,4 @@
-# GoldScope v2.41.6.5.6 - Error Boundary + Analytics Stability Fix
+# GoldScope v2.41.6.5.9 - Error Boundary + Analytics Stability Fix
 
 Purpose:
 Prevent a render error inside the Technical or Trade Targets panels from white-screening the whole Analytics page.

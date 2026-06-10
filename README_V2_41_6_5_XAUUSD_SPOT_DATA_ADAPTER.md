@@ -1,4 +1,4 @@
-# GoldScope v2.41.6.5 - XAUUSD Spot Data Adapter
+# GoldScope v2.41.6.5.9 - XAUUSD Spot Data Adapter
 
 Goal:
 Use OANDA:XAUUSD spot as the primary market source for TradingView, Technical Dashboard, Analytics, and Trade Targets.

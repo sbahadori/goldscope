@@ -179,15 +179,44 @@ function marketProxyPlugin() {
           const requestUrl = new URL(req.url, "http://localhost");
 
           if (requestUrl.pathname === "/api/market/health") {
+            let oandaCandlesOk = false;
+            let oandaCandlesError = "";
+            let oandaPricingOk = false;
+            let oandaPricingError = "";
+
+            if (token && accountId) {
+              try {
+                await callOanda("/v3/instruments/XAU_USD/candles?price=M&granularity=H1&count=3");
+                oandaCandlesOk = true;
+              } catch (error) {
+                oandaCandlesError = error.message || String(error);
+              }
+
+              try {
+                await callOanda(`/v3/accounts/${encodeURIComponent(accountId)}/pricing?instruments=XAU_USD`);
+                oandaPricingOk = true;
+              } catch (error) {
+                oandaPricingError = error.message || String(error);
+              }
+            } else {
+              oandaCandlesError = "OANDA credentials are not configured or not loaded.";
+              oandaPricingError = "OANDA credentials are not configured or not loaded.";
+            }
+
             sendJson(res, 200, {
               ok: true,
               name: "GoldScope Embedded Vite Market Proxy",
-              version: "v2.41.6.5.8",
+              version: "v2.41.6.5.9",
               embeddedInVite: true,
               oandaEnv,
               oandaConfigured: Boolean(token && accountId),
               credentialsFile: LOCAL_SECRETS_PATH,
               credentialsFileLoaded: Boolean(Object.keys(localCreds).length),
+              oandaCandlesOk,
+              oandaCandlesError,
+              oandaPricingOk,
+              oandaPricingError,
+              sourcePolicy: "force_oanda_spot_first_no_silent_gc_f_fallback",
               routes: ["/api/oanda/candles", "/api/oanda/pricing", "/api/yahoo/*", "/api/stooq/*"],
             });
             return;

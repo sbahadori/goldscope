@@ -3461,27 +3461,43 @@ async function fetchOandaPricing() {
 }
 
 function buildMarketSourceFromTechnicalContext(ctx = {}) {
+  const arbitration = ctx?.sourceArbitration || {};
   const active =
     ctx?.marketSource?.active ||
+    arbitration?.selectedActive ||
     (ctx?.sourceName === "OANDA" ? "OANDA:XAUUSD" :
       String(ctx?.symbol || "").includes("GC=F") ? "Yahoo:GC=F" :
       String(ctx?.symbol || "").includes("XAUUSD=X") ? "Yahoo:XAUUSD=X" :
       "unknown");
 
   const isOanda = active === "OANDA:XAUUSD";
+  const fallbackUsed = Boolean(arbitration?.fallbackUsed || (!isOanda && active !== "unknown" && active !== "none"));
+  const oandaFailure = arbitration?.oandaFailure || ctx?.oandaFailure || "";
+  const proxyWarning = "Proxy mode - not valid for exact spot targets.";
+
   return {
     primary: "OANDA:XAUUSD",
     instrument: "XAU_USD",
-    sourceType: isOanda ? "spot" : "fallback/proxy",
+    sourceType: isOanda ? "spot" : fallbackUsed ? "fallback/proxy" : "unavailable",
     fallback: "Yahoo:GC=F",
     active,
     isProxy: !isOanda,
+    fallbackUsed,
+    proxyRestricted: !isOanda,
+    diagnosticOnly: !isOanda,
+    exactSpotTargets: isOanda,
     lastUpdated: ctx?.lastUpdated || new Date().toISOString(),
-    providerStatus: isOanda ? "ok" : active === "unknown" || active === "none" ? "unavailable" : "fallback_used",
-    warning: isOanda ? "" : "OANDA spot unavailable; using fallback/proxy data. Trade targets may not match exact OANDA:XAUUSD spot.",
+    providerStatus: isOanda ? "spot_ok" : active === "unknown" || active === "none" ? "unavailable" : "fallback_used_oanda_failed",
+    oandaConfigured: Boolean(arbitration?.oandaConfigured),
+    oandaCandlesOk: Boolean(arbitration?.oandaCandlesOk || isOanda),
+    oandaPricingOk: Boolean(arbitration?.oandaPricingOk),
+    oandaFailure,
+    warning: isOanda
+      ? ""
+      : `${proxyWarning} OANDA spot unavailable or failed; using ${active} fallback. Trade targets are diagnostic only and may not match exact OANDA:XAUUSD spot.`,
+    proxyWarning,
   };
 }
-
 
 async function checkMarketProxyHealth() {
   const url = marketApiUrl("/api/market/health");
@@ -3522,29 +3538,35 @@ async function checkMarketProxyHealth() {
 async function loadBestTechnicalCandles() {
   const proxyHealth = await checkMarketProxyHealth();
   if (!proxyHealth?.ok) {
-    throw new Error("Market proxy is not healthy. Start GoldScope with npm run dev:full.");
+    throw new Error("Embedded market proxy is not healthy. Restart GoldScope with npm run dev.");
   }
 
-  const candidates = [
+  const oandaConfigured = Boolean(proxyHealth?.oandaConfigured);
+  const attempts = [];
+
+  const oandaCandidates = [
     { sourceName: "OANDA", symbol: "OANDA:XAUUSD", providerSymbol: "XAU_USD", range: "600", interval: "1h", granularity: "H1", fetcher: () => fetchOandaCandles("H1", 600) },
+    { sourceName: "OANDA", symbol: "OANDA:XAUUSD", providerSymbol: "XAU_USD", range: "300", interval: "1d", granularity: "D", fetcher: () => fetchOandaCandles("D", 300) },
+  ];
+
+  const fallbackCandidates = [
     { sourceName: "Yahoo", symbol: "XAUUSD=X", range: "1y", interval: "1h", fetcher: () => fetchYahooChart("XAUUSD=X", "1y", "1h") },
     { sourceName: "Yahoo", symbol: "GC=F", range: "1y", interval: "1h", fetcher: () => fetchYahooChart("GC=F", "1y", "1h") },
     { sourceName: "Yahoo", symbol: "XAUUSD=X", range: "90d", interval: "1h", fetcher: () => fetchYahooChart("XAUUSD=X", "90d", "1h") },
     { sourceName: "Yahoo", symbol: "GC=F", range: "90d", interval: "1h", fetcher: () => fetchYahooChart("GC=F", "90d", "1h") },
-    { sourceName: "OANDA", symbol: "OANDA:XAUUSD", providerSymbol: "XAU_USD", range: "300", interval: "1d", granularity: "D", fetcher: () => fetchOandaCandles("D", 300) },
     { sourceName: "Yahoo", symbol: "XAUUSD=X", range: "1y", interval: "1d", fetcher: () => fetchYahooChart("XAUUSD=X", "1y", "1d") },
     { sourceName: "Yahoo", symbol: "GC=F", range: "1y", interval: "1d", fetcher: () => fetchYahooChart("GC=F", "1y", "1d") },
     { sourceName: "Stooq", symbol: "xauusd", range: "370d", interval: "1d", fetcher: () => fetchStooqDaily("xauusd") },
   ];
 
-  const attempts = [];
-  for (const candidate of candidates) {
+  const tryCandidate = async (candidate, mode) => {
     try {
       const candles = await candidate.fetcher();
       const cleaned = sanitizeCandles(candles, candidate.symbol);
       const qualityLabel = technicalSourceQualityLabel(cleaned.qualityScore, cleaned.issues);
-      attempts.push({
+      const record = {
         ...candidate,
+        mode,
         candles,
         cleanCount: cleaned.cleanCount,
         rawCount: cleaned.rawCount,
@@ -3552,13 +3574,14 @@ async function loadBestTechnicalCandles() {
         qualityLabel,
         issues: cleaned.issues,
         ok: qualityLabel === "good" || qualityLabel === "usable",
-      });
-      if (qualityLabel === "good" || qualityLabel === "usable") {
-        return { ...candidate, candles, attempts };
-      }
+      };
+      attempts.push(record);
+      if (record.ok) return record;
+      return null;
     } catch (err) {
-      attempts.push({
+      const record = {
         ...candidate,
+        mode,
         candles: [],
         cleanCount: 0,
         rawCount: 0,
@@ -3566,25 +3589,78 @@ async function loadBestTechnicalCandles() {
         qualityLabel: "error",
         issues: [err.message],
         ok: false,
-      });
+      };
+      attempts.push(record);
+      return null;
+    }
+  };
+
+  if (oandaConfigured) {
+    for (const candidate of oandaCandidates) {
+      const selected = await tryCandidate(candidate, "forced_oanda_spot");
+      if (selected) {
+        return {
+          ...selected,
+          attempts,
+          sourceArbitration: {
+            policy: "force_oanda_spot_first",
+            mode: "spot",
+            selectedActive: "OANDA:XAUUSD",
+            oandaConfigured: true,
+            oandaCandlesOk: true,
+            oandaPricingOk: Boolean(proxyHealth?.oandaPricingOk),
+            oandaPricingError: proxyHealth?.oandaPricingError || "",
+            fallbackUsed: false,
+            proxyRestricted: false,
+            diagnosticOnly: false,
+            exactSpotTargets: true,
+            oandaFailure: "",
+            note: "OANDA spot source selected; fallback was not used.",
+          },
+        };
+      }
     }
   }
 
-  const best = attempts
-    .filter((a) => a.candles?.length)
-    .sort((a, b) => b.qualityScore - a.qualityScore)[0];
+  const oandaFailure = oandaConfigured
+    ? attempts
+        .filter((a) => a.sourceName === "OANDA")
+        .map((a) => `${a.symbol}/${a.interval}: ${a.issues?.[0] || a.qualityLabel}`)
+        .join(" | ") || "OANDA configured but no usable OANDA candles returned."
+    : "OANDA credentials are not configured or not loaded.";
 
-  if (best) {
-    return { ...best, attempts };
+  for (const candidate of fallbackCandidates) {
+    const selected = await tryCandidate(candidate, "fallback_proxy_after_oanda_unavailable");
+    if (selected) {
+      return {
+        ...selected,
+        attempts,
+        sourceArbitration: {
+          policy: "force_oanda_spot_first",
+          mode: "proxy_diagnostic",
+          selectedActive: selected.sourceName === "Yahoo" ? `Yahoo:${selected.symbol}` : `${selected.sourceName}:${selected.symbol}`,
+          oandaConfigured,
+          oandaCandlesOk: false,
+          oandaPricingOk: Boolean(proxyHealth?.oandaPricingOk),
+          oandaPricingError: proxyHealth?.oandaPricingError || "",
+          fallbackUsed: true,
+          proxyRestricted: true,
+          diagnosticOnly: true,
+          exactSpotTargets: false,
+          oandaFailure,
+          proxyWarning: "Proxy mode - not valid for exact spot targets.",
+          note: `OANDA spot failed or unavailable; fallback selected: ${selected.sourceName}:${selected.symbol}.`,
+        },
+      };
+    }
   }
 
   throw new Error(
     `All technical data sources failed after market proxy health passed. ` +
-    `If OANDA is not configured, set OANDA_API_TOKEN/OANDA_ACCOUNT_ID or rely on Yahoo/Stooq if reachable. ` +
+    `OANDA status: ${oandaFailure}. ` +
     `Details: ${attempts.map((a) => `${a.sourceName}:${a.symbol}:${a.issues?.[0] || a.qualityLabel}`).join(" | ")}`
   );
 }
-
 
 async function fetchYahooChart(symbol = "XAUUSD=X", range = "90d", interval = "1h") {
   const url = marketApiUrl(`/api/yahoo/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`);
@@ -4338,14 +4414,25 @@ function buildGoldTradeScenarioPlan(snapshot) {
   const levels = technicalTradeLevelExtractor(snapshot);
   const overlay = macroFundamentalOverlayMapper(snapshot);
   const plan = tradeScenarioBuilder(levels, overlay);
+  const marketSource = snapshot?.marketSource || snapshot?.technicalContext?.marketSource || {};
+  const proxyMode = Boolean(marketSource?.isProxy || marketSource?.proxyRestricted || marketSource?.active !== "OANDA:XAUUSD");
+  const proxyWarning = "Proxy mode - not valid for exact spot targets.";
   return {
     ...plan,
+    mode: proxyMode ? "diagnostic_proxy_mode" : "spot_oanda_mode",
+    diagnosticOnly: proxyMode,
+    exactSpotTargets: !proxyMode,
+    executionAllowed: false,
+    sourceModeWarning: proxyMode
+      ? `${proxyWarning} OANDA spot failed/unavailable; scenario levels are diagnostic only and should not be treated as exact OANDA:XAUUSD spot targets.`
+      : "OANDA:XAUUSD spot source active; scenario levels are based on OANDA spot candles.",
+    oandaFailure: marketSource?.oandaFailure || "",
     generatedAt: snapshot?.generatedAt || new Date().toISOString(),
     technicalLevelSnapshot: levels,
     levelSourcePolicy: {
       rule: "Every entry, stop, and target should carry a source label.",
       allowedSources: ["EMA20", "EMA50", "support cluster", "resistance cluster", "Bollinger lower", "extended objective"],
-      proxyWarning: "These are approximate proxy levels from GC=F/Yahoo technical context, not the live TradingView XAUUSD spot price.",
+      proxyWarning,
     },
   };
 }
@@ -8570,7 +8657,8 @@ function TradeScenarioDashboardPanel() {
   const sourceIsProxy = marketSource?.active && marketSource.active !== "OANDA:XAUUSD";
   const sourceNote = marketSource?.active === "OANDA:XAUUSD"
     ? "Trade targets are built from OANDA:XAUUSD spot technical candles."
-    : marketSource?.warning || "Trade targets are based on fallback/proxy data, not exact OANDA:XAUUSD spot.";
+    : marketSource?.warning || "Proxy mode - not valid for exact spot targets. Trade targets are diagnostic only because OANDA spot is unavailable or failed.";
+  const proxyDiagnosticMode = Boolean(plan?.diagnosticOnly || marketSource?.isProxy || marketSource?.proxyRestricted);
 
   const fmt = (value) => {
     if (Array.isArray(value)) return value.map(fmt).join(" → ");
@@ -9484,7 +9572,7 @@ const ScenarioPathMiniChart = ({ scenario, primaryFlag = false }) => {
             <div>
               <h1 style={{ color: C.text, margin: 0, fontSize: 24 }}>GoldScope Trade Scenario Dashboard</h1>
               <p style={{ color: C.muted, margin: "6px 0 0", fontSize: 13 }}>
-                Trade Targets · deterministic snapshot.tradeScenarioPlan · GC=F proxy levels
+                Trade Targets · deterministic snapshot.tradeScenarioPlan · OANDA-first source policy
               </p>
             </div>
           </div>
@@ -9507,6 +9595,22 @@ const ScenarioPathMiniChart = ({ scenario, primaryFlag = false }) => {
             <p style={{ color: sourceIsProxy ? C.gold : C.green, lineHeight: 1.6, margin: "8px 0 0", fontSize: 12, fontWeight: 850 }}>
               Market source: {marketSource?.active || "unknown"} · {sourceNote}
             </p>
+            {proxyDiagnosticMode && (
+              <div style={{
+                marginTop: 10,
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: `1px solid ${C.gold}`,
+                background: "#2b210966",
+                color: C.gold,
+                fontWeight: 900,
+                fontSize: 12,
+                lineHeight: 1.65,
+              }}>
+                Proxy mode - not valid for exact spot targets. This Trade Targets panel is diagnostic/limited because OANDA:XAUUSD spot data is not the active source.
+                {marketSource?.oandaFailure ? <div style={{ marginTop: 4, color: C.muted }}>OANDA failure: {marketSource.oandaFailure}</div> : null}
+              </div>
+            )}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
               <Badge value={overlay.employmentSignal || employment?.headline?.surpriseDirection || "employment unknown"}>
                 {overlay.employmentSignal || employment?.headline?.surpriseDirection || "employment unknown"}
@@ -12598,6 +12702,15 @@ ${err.message}`);
           ctx.multiTimeframeError = mtErr.message;
         }
 
+        ctx.sourceArbitration = selected.sourceArbitration || {
+          policy: "force_oanda_spot_first",
+          mode: selected.sourceName === "OANDA" ? "spot" : "proxy_diagnostic",
+          selectedActive: selected.sourceName === "OANDA" ? "OANDA:XAUUSD" : `${selected.sourceName}:${selected.symbol}`,
+          fallbackUsed: selected.sourceName !== "OANDA",
+          proxyRestricted: selected.sourceName !== "OANDA",
+          diagnosticOnly: selected.sourceName !== "OANDA",
+          exactSpotTargets: selected.sourceName === "OANDA",
+        };
         ctx.sourceSelection = {
           selected: {
             sourceName: selected.sourceName,
@@ -12605,11 +12718,13 @@ ${err.message}`);
             range: selected.range,
             interval: selected.interval,
           },
+          sourceArbitration: ctx.sourceArbitration,
           attempts: selected.attempts.map((a) => ({
             sourceName: a.sourceName,
             symbol: a.symbol,
             range: a.range,
             interval: a.interval,
+            mode: a.mode,
             qualityScore: a.qualityScore,
             qualityLabel: a.qualityLabel,
             rawCount: a.rawCount,
@@ -14098,7 +14213,7 @@ function buildGoldScopeContextSnapshot() {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
         primaryMarketSource: "OANDA:XAUUSD",
-        appVersion: "GoldScope v2.41.6.5.8.3",
+        appVersion: "GoldScope v2.41.6.5.9",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -17485,7 +17600,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.6.5.8.3",
+        appVersion: "GoldScope v2.41.6.5.9",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -17841,7 +17956,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.6.5.8.3",
+        appVersion: "GoldScope v2.41.6.5.9",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -18044,7 +18159,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.6.5.8.3",
+        appVersion: "GoldScope v2.41.6.5.9",
         prototypeBoundary: "Product UX shell over local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -18200,7 +18315,7 @@ ${err.stack || err.message || String(err)}`);
 
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <Card>
-            <Title icon="🏗️" title="BI Migration Boundary" sub="What stays in GoldScope v2.41.6.5.8.3 what moves to BI." />
+            <Title icon="🏗️" title="BI Migration Boundary" sub="What stays in GoldScope v2.41.6.5.9 what moves to BI." />
             <div style={{ display: "grid", gap: 10 }}>
               <Card style={{ background: C.card2, borderColor: `${C.green}55` }}>
                 <b style={{ color: C.green }}>Keep in GoldScope UI</b>
@@ -18344,7 +18459,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.6.5.8.3</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.6.5.9</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>

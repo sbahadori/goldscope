@@ -1,4 +1,4 @@
-# GoldScope v2.41.6.5.1 - Internal Proxy Routing Fix
+# GoldScope v2.41.6.5.9 - Internal Proxy Routing Fix
 
 Root cause of the error:
 - Vite was only proxying `/api/oanda`.

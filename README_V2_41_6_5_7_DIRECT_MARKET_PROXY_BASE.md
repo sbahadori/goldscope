@@ -1,4 +1,4 @@
-# GoldScope v2.41.6.5.7 - Direct Market Proxy Base
+# GoldScope v2.41.6.5.9 - Direct Market Proxy Base
 
 Problem:
 The app was calling market data through Vite relative paths such as `/api/market/health`.
