@@ -1,0 +1,36 @@
+{
+  "generatedAt": "2026-05-30T13:02:57.606Z",
+  "output": "C:\\src\\Gold\\goldscope\\public\\data\\official_gold_calendar_2026.json",
+  "sources": {
+    "fed": {
+      "status": "live",
+      "count": 4,
+      "durationMs": 218,
+      "error": null
+    },
+    "bls": {
+      "status": "live",
+      "count": 7,
+      "durationMs": 875,
+      "error": null
+    },
+    "bea": {
+      "status": "empty",
+      "count": 0,
+      "durationMs": 306,
+      "error": null
+    },
+    "eia": {
+      "status": "live",
+      "count": 26,
+      "durationMs": 212,
+      "error": null
+    },
+    "tradingEconomics": {
+      "status": "empty",
+      "count": 0,
+      "durationMs": 2,
+      "error": null
+    }
+  }
+}

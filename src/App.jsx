@@ -16,6 +16,17 @@ const C = {
   gray: "#64748b",
 };
 
+const MARKET_PROXY_BASE =
+  typeof window !== "undefined" && window.localStorage?.getItem("goldscope.marketProxyBase")
+    ? window.localStorage.getItem("goldscope.marketProxyBase")
+    : "";
+
+function marketApiUrl(path = "") {
+  const cleanBase = String(MARKET_PROXY_BASE || "").replace(/\/$/, "");
+  const cleanPath = String(path || "").startsWith("/") ? String(path) : `/${path}`;
+  return cleanBase ? `${cleanBase}${cleanPath}` : cleanPath;
+}
+
 const DEFAULT_SETTINGS = {
   gdeltQuery: '("gold" OR "XAUUSD") AND ("federal reserve" OR "FOMC" OR "treasury yield" OR "real yield" OR "dollar index" OR "DXY" OR "inflation" OR "CPI" OR "PCE" OR "payrolls" OR "NFP" OR "interest rate" OR "rate cut" OR "rate hike" OR "geopolitical" OR "central bank" OR "safe haven") sourcelang:english',
   gdeltTimespan: "1d",
@@ -1113,7 +1124,7 @@ function buildEventIdentity(event) {
 }
 
 async function fetchYahooLatest(symbol) {
-  const url = `/api/yahoo/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1m`;
+  const url = marketApiUrl(`/api/yahoo/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1m`);
   const response = await fetch(url, { headers: { Accept: "application/json,text/plain,*/*" } });
   const raw = await response.text();
   if (!response.ok) throw new Error(`Yahoo ${symbol} HTTP ${response.status}: ${raw.slice(0, 120)}`);
@@ -1219,7 +1230,7 @@ function autoJobStatus(job) {
 async function fetchYahooWindow(symbol, startMs, endMs, interval = "1m") {
   const period1 = Math.floor(startMs / 1000);
   const period2 = Math.floor(endMs / 1000);
-  const url = `/api/yahoo/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${period1}&period2=${period2}&interval=${interval}&includePrePost=true`;
+  const url = marketApiUrl(`/api/yahoo/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${period1}&period2=${period2}&interval=${interval}&includePrePost=true`);
   const response = await fetch(url, { headers: { Accept: "application/json,text/plain,*/*" } });
   const raw = await response.text();
   if (!response.ok) throw new Error(`Yahoo ${symbol} ${interval} HTTP ${response.status}: ${raw.slice(0, 120)}`);
@@ -2136,33 +2147,55 @@ function percentile(values, p) {
 
 function technicalSymbolMeta(symbol) {
   const s = String(symbol || "").toUpperCase();
+  if (s.includes("OANDA:XAUUSD") || s.includes("XAU_USD")) {
+    return {
+      instrument: "XAU_USD",
+      providerInstrument: "OANDA:XAUUSD",
+      sourceType: "spot",
+      proxy: "OANDA XAU_USD spot candles.",
+      expectedPriceMin: 500,
+      expectedPriceMax: 8000,
+      maxSingleCandleReturn: 0.12,
+      preferred: true,
+      isProxy: false,
+    };
+  }
   if (s.includes("XAUUSD")) {
     return {
       instrument: "XAUUSD",
+      providerInstrument: "Yahoo:XAUUSD=X",
+      sourceType: "spot-proxy",
       proxy: "Spot gold proxy from Yahoo symbol XAUUSD=X.",
       expectedPriceMin: 500,
       expectedPriceMax: 8000,
       maxSingleCandleReturn: 0.12,
       preferred: true,
+      isProxy: true,
     };
   }
   if (s.includes("GC=F") || s.includes("GC")) {
     return {
       instrument: "GC futures",
+      providerInstrument: "Yahoo:GC=F",
+      sourceType: "futures-proxy",
       proxy: "Gold futures proxy for XAUUSD; not direct spot XAUUSD.",
       expectedPriceMin: 500,
       expectedPriceMax: 8000,
       maxSingleCandleReturn: 0.15,
       preferred: false,
+      isProxy: true,
     };
   }
   return {
     instrument: "gold proxy",
+    providerInstrument: "unknown",
+    sourceType: "proxy",
     proxy: "Gold price proxy.",
     expectedPriceMin: 500,
     expectedPriceMax: 8000,
     maxSingleCandleReturn: 0.15,
     preferred: false,
+    isProxy: true,
   };
 }
 
@@ -3211,6 +3244,21 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
     sourceName,
     proxy: meta.proxy,
     instrument: meta.instrument,
+    providerInstrument: meta.providerInstrument,
+    sourceType: meta.sourceType,
+    isProxy: Boolean(meta.isProxy),
+    priceType: meta.isProxy ? "proxy" : "spot",
+    marketSource: {
+      primary: "OANDA:XAUUSD",
+      instrument: "XAU_USD",
+      sourceType: meta.isProxy ? "fallback/proxy" : "spot",
+      fallback: "Yahoo:GC=F",
+      active: meta.providerInstrument || symbol,
+      isProxy: Boolean(meta.isProxy),
+      lastUpdated: c[c.length - 1]?.time || new Date().toISOString(),
+      providerStatus: meta.isProxy ? "fallback_used" : "ok",
+      warning: meta.isProxy ? "OANDA spot unavailable; using fallback/proxy data." : "",
+    },
     status: technicalReliability === "unreliable" ? "unreliable" : "available",
     reliability: technicalReliability,
     usableForScenario: technicalReliability !== "unreliable",
@@ -3307,7 +3355,7 @@ function computeTechnicalContextFromCandles(candles, symbol = "XAUUSD=X", timefr
     technicalConfidence,
     guardrails: [
       "Technical analysis is confirmation/context only; it must not override missing macro/event evidence.",
-      "Price levels come from GC=F proxy data, not direct spot XAUUSD.",
+      meta.isProxy ? "Price levels come from fallback/proxy data, not exact OANDA:XAUUSD spot." : "Price levels come from OANDA:XAUUSD spot candles.",
       "If reliability is unreliable, treat technicals as diagnostic only, not scenario evidence.",
     ],
   };
@@ -3319,15 +3367,18 @@ async function fetchStooqDaily(symbol = "xauusd") {
   const start = new Date();
   start.setDate(end.getDate() - 370);
   const fmt = (d) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
-  const url = `/api/stooq/q/d/l/?s=${encodeURIComponent(symbol)}&d1=${fmt(start)}&d2=${fmt(end)}&i=d`;
+  const url = marketApiUrl(`/api/stooq/q/d/l/?s=${encodeURIComponent(symbol)}&d1=${fmt(start)}&d2=${fmt(end)}&i=d`);
   const res = await fetch(url, { cache: "no-store" });
   const csv = await res.text();
   if (!res.ok) throw new Error(`Stooq HTTP ${res.status}: ${csv.slice(0, 300)}`);
   if (!csv || /No data/i.test(csv)) throw new Error(`Stooq returned no data for ${symbol}`);
+  if (/^\s*</.test(csv)) {
+    throw new Error("Stooq endpoint returned HTML instead of CSV. Start the GoldScope market proxy and ensure Vite proxies /api to same-origin Vite /api market proxy.");
+  }
 
   const lines = csv.trim().split(/\r?\n/);
   const header = lines.shift();
-  if (!header || !/date/i.test(header)) throw new Error("Stooq CSV header missing");
+  if (!header || !/date/i.test(header)) throw new Error(`Stooq CSV header missing: ${String(header || "").slice(0, 120)}`);
   return lines.map((line) => {
     const [date, open, high, low, close] = line.split(",");
     return {
@@ -3342,12 +3393,145 @@ async function fetchStooqDaily(symbol = "xauusd") {
   );
 }
 
+function normalizeOandaCandles(payload = {}) {
+  const rows = Array.isArray(payload?.candles) ? payload.candles : [];
+  return rows
+    .filter((c) => c && c.complete !== false && c.mid)
+    .map((c) => ({
+      time: c.time,
+      open: Number(c.mid.o),
+      high: Number(c.mid.h),
+      low: Number(c.mid.l),
+      close: Number(c.mid.c),
+      volume: Number.isFinite(Number(c.volume)) ? Number(c.volume) : null,
+    }))
+    .filter((x) =>
+      Number.isFinite(x.open) &&
+      Number.isFinite(x.high) &&
+      Number.isFinite(x.low) &&
+      Number.isFinite(x.close)
+    );
+}
+
+async function fetchOandaCandles(granularity = "H1", count = 600) {
+  const url = marketApiUrl(`/api/oanda/candles?instrument=XAU_USD&granularity=${encodeURIComponent(granularity)}&count=${encodeURIComponent(count)}`);
+  const res = await fetch(url, { cache: "no-store", headers: { Accept: "application/json" } });
+  const raw = await res.text();
+  if (!res.ok) {
+    let message = raw.slice(0, 300);
+    try {
+      const parsed = JSON.parse(raw);
+      message = parsed?.error || parsed?.note || parsed?.message || message;
+    } catch {
+      // keep raw
+    }
+    throw new Error(`OANDA candles HTTP ${res.status}: ${message || "empty response from market proxy/OANDA upstream"}`);
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error("OANDA candles returned non-JSON response.");
+  }
+  const candles = normalizeOandaCandles(data);
+  if (!candles.length) throw new Error("OANDA candles returned no usable OHLC rows.");
+  return candles;
+}
+
+async function fetchOandaPricing() {
+  const url = marketApiUrl("/api/oanda/pricing?instrument=XAU_USD");
+  const res = await fetch(url, { cache: "no-store", headers: { Accept: "application/json" } });
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`OANDA pricing HTTP ${res.status}: ${raw.slice(0, 300)}`);
+  const data = JSON.parse(raw);
+  const price = data?.prices?.[0];
+  const bid = Number(price?.bids?.[0]?.price);
+  const ask = Number(price?.asks?.[0]?.price);
+  const mid = Number.isFinite(bid) && Number.isFinite(ask) ? (bid + ask) / 2 : Number(price?.closeoutBid || price?.closeoutAsk);
+  if (!Number.isFinite(mid)) throw new Error("OANDA pricing returned no usable XAU_USD price.");
+  return {
+    symbol: "OANDA:XAUUSD",
+    instrument: "XAU_USD",
+    price: round2(mid),
+    bid: Number.isFinite(bid) ? round2(bid) : null,
+    ask: Number.isFinite(ask) ? round2(ask) : null,
+    timestamp: price?.time || new Date().toISOString(),
+    source: "OANDA REST pricing proxy",
+  };
+}
+
+function buildMarketSourceFromTechnicalContext(ctx = {}) {
+  const active =
+    ctx?.marketSource?.active ||
+    (ctx?.sourceName === "OANDA" ? "OANDA:XAUUSD" :
+      String(ctx?.symbol || "").includes("GC=F") ? "Yahoo:GC=F" :
+      String(ctx?.symbol || "").includes("XAUUSD=X") ? "Yahoo:XAUUSD=X" :
+      "unknown");
+
+  const isOanda = active === "OANDA:XAUUSD";
+  return {
+    primary: "OANDA:XAUUSD",
+    instrument: "XAU_USD",
+    sourceType: isOanda ? "spot" : "fallback/proxy",
+    fallback: "Yahoo:GC=F",
+    active,
+    isProxy: !isOanda,
+    lastUpdated: ctx?.lastUpdated || new Date().toISOString(),
+    providerStatus: isOanda ? "ok" : active === "unknown" || active === "none" ? "unavailable" : "fallback_used",
+    warning: isOanda ? "" : "OANDA spot unavailable; using fallback/proxy data. Trade targets may not match exact OANDA:XAUUSD spot.",
+  };
+}
+
+
+async function checkMarketProxyHealth() {
+  const url = marketApiUrl("/api/market/health");
+  let res;
+  try {
+    res = await fetch(url, { cache: "no-store", headers: { Accept: "application/json" } });
+  } catch (error) {
+    throw new Error(`Embedded Vite market proxy is not reachable. Restart the app with "npm run dev". Details: ${error.message || String(error)}`);
+  }
+
+  const raw = await res.text();
+  if (!res.ok) {
+    if (/^\s*</.test(raw)) {
+      throw new Error('Market proxy health returned HTML instead of JSON. This means Vite middleware did not catch /api/market/health. Restart Vite.');
+    }
+    throw new Error(`Market proxy health check failed: HTTP ${res.status}: ${raw.slice(0, 500)}`);
+  }
+
+  if (/^\s*</.test(raw)) {
+    throw new Error('Market proxy health returned HTML instead of JSON. Restart with "npm run dev" and open /api/market/health.');
+  }
+
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error(`Market proxy health returned non-JSON: ${raw.slice(0, 300)}`);
+  }
+
+  if (!data?.ok) {
+    throw new Error(`Market proxy is not healthy: ${JSON.stringify(data).slice(0, 500)}`);
+  }
+
+  return data;
+}
+
+
 async function loadBestTechnicalCandles() {
+  const proxyHealth = await checkMarketProxyHealth();
+  if (!proxyHealth?.ok) {
+    throw new Error("Market proxy is not healthy. Start GoldScope with npm run dev:full.");
+  }
+
   const candidates = [
+    { sourceName: "OANDA", symbol: "OANDA:XAUUSD", providerSymbol: "XAU_USD", range: "600", interval: "1h", granularity: "H1", fetcher: () => fetchOandaCandles("H1", 600) },
     { sourceName: "Yahoo", symbol: "XAUUSD=X", range: "1y", interval: "1h", fetcher: () => fetchYahooChart("XAUUSD=X", "1y", "1h") },
     { sourceName: "Yahoo", symbol: "GC=F", range: "1y", interval: "1h", fetcher: () => fetchYahooChart("GC=F", "1y", "1h") },
     { sourceName: "Yahoo", symbol: "XAUUSD=X", range: "90d", interval: "1h", fetcher: () => fetchYahooChart("XAUUSD=X", "90d", "1h") },
     { sourceName: "Yahoo", symbol: "GC=F", range: "90d", interval: "1h", fetcher: () => fetchYahooChart("GC=F", "90d", "1h") },
+    { sourceName: "OANDA", symbol: "OANDA:XAUUSD", providerSymbol: "XAU_USD", range: "300", interval: "1d", granularity: "D", fetcher: () => fetchOandaCandles("D", 300) },
     { sourceName: "Yahoo", symbol: "XAUUSD=X", range: "1y", interval: "1d", fetcher: () => fetchYahooChart("XAUUSD=X", "1y", "1d") },
     { sourceName: "Yahoo", symbol: "GC=F", range: "1y", interval: "1d", fetcher: () => fetchYahooChart("GC=F", "1y", "1d") },
     { sourceName: "Stooq", symbol: "xauusd", range: "370d", interval: "1d", fetcher: () => fetchStooqDaily("xauusd") },
@@ -3394,16 +3578,34 @@ async function loadBestTechnicalCandles() {
     return { ...best, attempts };
   }
 
-  throw new Error(`All technical data sources failed: ${attempts.map((a) => `${a.sourceName}:${a.symbol}:${a.issues?.[0] || a.qualityLabel}`).join(" | ")}`);
+  throw new Error(
+    `All technical data sources failed after market proxy health passed. ` +
+    `If OANDA is not configured, set OANDA_API_TOKEN/OANDA_ACCOUNT_ID or rely on Yahoo/Stooq if reachable. ` +
+    `Details: ${attempts.map((a) => `${a.sourceName}:${a.symbol}:${a.issues?.[0] || a.qualityLabel}`).join(" | ")}`
+  );
 }
 
 
 async function fetchYahooChart(symbol = "XAUUSD=X", range = "90d", interval = "1h") {
-  const url = `/api/yahoo/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`;
-  const res = await fetch(url, { cache: "no-store" });
+  const url = marketApiUrl(`/api/yahoo/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`);
+  const res = await fetch(url, { cache: "no-store", headers: { Accept: "application/json,text/plain,*/*" } });
   const text = await res.text();
-  if (!res.ok) throw new Error(`Yahoo chart HTTP ${res.status}: ${text.slice(0, 300)}`);
-  const data = JSON.parse(text);
+
+  if (!res.ok) {
+    throw new Error(`Yahoo chart HTTP ${res.status}: ${text.slice(0, 300)}`);
+  }
+
+  if (/^\s*</.test(text)) {
+    throw new Error("Yahoo chart endpoint returned HTML instead of JSON. Start the GoldScope market proxy and ensure Vite proxies /api to same-origin Vite /api market proxy.");
+  }
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`Yahoo chart returned non-JSON response: ${text.slice(0, 160)}`);
+  }
+
   const result = data?.chart?.result?.[0];
   const timestamps = result?.timestamp || [];
   const quote = result?.indicators?.quote?.[0] || {};
@@ -4126,7 +4328,7 @@ function tradeScenarioBuilder(levels, overlay) {
     primaryPlan,
     alternativePlans,
     fundamentalOverlay: overlay,
-    proxyLevelNote: "These are approximate proxy levels from GC=F technical context, not exact spot XAUUSD levels.",
+    proxyLevelNote: "These are approximate proxy levels from GC=F/Yahoo technical context, not the live TradingView XAUUSD spot price.",
     sourceAttributionRequired: true,
     decision: "do_not_force_trade_until_trigger",
   };
@@ -4143,7 +4345,7 @@ function buildGoldTradeScenarioPlan(snapshot) {
     levelSourcePolicy: {
       rule: "Every entry, stop, and target should carry a source label.",
       allowedSources: ["EMA20", "EMA50", "support cluster", "resistance cluster", "Bollinger lower", "extended objective"],
-      proxyWarning: "These are approximate proxy levels from GC=F technical context, not exact spot XAUUSD levels.",
+      proxyWarning: "These are approximate proxy levels from GC=F/Yahoo technical context, not the live TradingView XAUUSD spot price.",
     },
   };
 }
@@ -4313,7 +4515,7 @@ function buildGoldTradeScenarioPlanSection(snapshot) {
   const bounce = a.find((x) => x.name === "Support bounce buy") || {};
   const breakout = a.find((x) => x.name === "Breakout buy") || {};
   const overlay = plan.fundamentalOverlay || {};
-  const proxyNote = plan.proxyLevelNote || "These are approximate proxy levels from GC=F technical context, not exact spot XAUUSD levels.";
+  const proxyNote = plan.proxyLevelNote || "These are approximate proxy levels from GC=F/Yahoo technical context, not the live TradingView XAUUSD spot price.";
   const pSources = p.levelSources || {};
   const breakdownSources = breakdown.levelSources || {};
   const bounceSources = bounce.levelSources || {};
@@ -5999,12 +6201,12 @@ const UI_FA_EXACT = {
   "Important:": "مهم:",
   "Research software only. No financial advice, no broker connection, no automatic trading. XAUUSD can be highly volatile.": "این نرم‌افزار صرفاً پژوهشی است. نه توصیه مالی می‌دهد، نه به بروکر وصل می‌شود و نه معامله خودکار انجام می‌دهد. XAUUSD می‌تواند بسیار پرنوسان باشد.",
   "Live XAUUSD Chart": "نمودار زنده XAUUSD",
-  "TradingView OANDA:XAUUSD": "TradingView OANDA:XAUUSD",
+  "TradingView XAUUSD": "TradingView XAUUSD",
   "Technical panel error": "خطای پنل تکنیکال",
   "The Technical UI failed to render, but the analysis engine is not affected.": "رندر رابط کاربری تکنیکال با خطا مواجه شد، اما موتور تحلیل تحت تأثیر قرار نگرفته است.",
   "This is a UI-only failure. Report generation, validators, macro logic, employment logic, and BLS parser are unchanged.": "این خطا فقط مربوط به UI است. تولید گزارش، ولیدیتورها، منطق ماکرو، منطق اشتغال و parser مربوط به BLS تغییری نکرده‌اند.",
-  "Step 1 - Internal Ollama Proxy": "مرحله ۱ - پراکسی داخلی Ollama",
-  "Built into Vite. No separate proxy BAT is needed.": "داخل Vite تعبیه شده است و به فایل BAT جداگانه برای پراکسی نیاز نیست.",
+  "Step 1 - Ollama Connection": "مرحله ۱ - پراکسی داخلی Ollama",
+  "Use direct local Ollama. No Vite proxy is needed.": "داخل Vite تعبیه شده است و به فایل BAT جداگانه برای پراکسی نیاز نیست.",
   "Step 2 - Ollama": "مرحله ۲ - Ollama",
   "No API key. Uses your installed local model.": "به API key نیاز ندارد و از مدل محلی نصب‌شده شما استفاده می‌کند.",
   "Step 3 - Macro-Guarded Context Prompt": "مرحله ۳ - پرامپت زمینه با گارد ماکرو",
@@ -6192,11 +6394,11 @@ function TradingViewChart() {
     <Card style={{ padding: 0, overflow: "hidden", minHeight: 620 }}>
       <div style={{ padding: 14, borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between" }}>
         <strong style={{ color: C.gold }}>Live XAUUSD Chart</strong>
-        <Badge value="live">TradingView OANDA:XAUUSD</Badge>
+        <Badge value="live">TradingView XAUUSD</Badge>
       </div>
       <iframe
         title="TradingView XAUUSD"
-        src="https://s.tradingview.com/widgetembed/?frameElementId=tradingview_xauusd&symbol=OANDA%3AXAUUSD&interval=60&hidesidetoolbar=0&symboledit=0&saveimage=1&theme=dark&style=1&timezone=Etc%2FUTC&withdateranges=1&hideideas=1"
+        src="https://s.tradingview.com/widgetembed/?frameElementId=tradingview_xauusd&symbol=XAUUSD&interval=60&hidesidetoolbar=0&symboledit=0&saveimage=1&theme=dark&style=1&timezone=Etc%2FUTC&withdateranges=1&hideideas=1"
         style={{ width: "100%", height: 560, border: 0 }}
         allowFullScreen
       />
@@ -6204,9 +6406,125 @@ function TradingViewChart() {
   );
 }
 
+class TechnicalPanelErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error("Technical panel render error", error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{
+          background: "#101827",
+          border: "1px solid #25324a",
+          borderRadius: 16,
+          padding: 16,
+        }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14 }}>
+            <span style={{ color: "#f59e0b", fontSize: 20 }}>⚠️</span>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 18 }}>Technical panel error</h2>
+              <p style={{ color: "#9fb0c8", fontSize: 12, margin: "4px 0 0" }}>
+                The Technical UI failed to render, but the analysis engine is not affected.
+              </p>
+            </div>
+          </div>
+          <p style={{ color: "#ef4444", lineHeight: 1.7 }}>
+            {String(this.state.error?.message || this.state.error)}
+          </p>
+          <p style={{ color: "#9fb0c8", lineHeight: 1.7 }}>
+            This is a UI-only failure. Report generation, validators, macro logic, employment logic, and BLS parser are unchanged.
+          </p>
+          <button
+            type="button"
+            onClick={() => this.setState({ error: null })}
+            style={{
+              marginTop: 8,
+              background: "#f59e0b",
+              color: "#111827",
+              border: 0,
+              borderRadius: 8,
+              padding: "6px 12px",
+              cursor: "pointer",
+              fontWeight: 900,
+            }}
+          >
+            Retry panel
+          </button>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+class GeneralErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error("Panel error:", error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{
+          background: "#170a12",
+          border: "1px solid #7f1d1d",
+          borderRadius: 16,
+          padding: 16,
+          color: "#9fb0c8",
+        }}>
+          <strong style={{ color: "#ef4444" }}>Panel error: </strong>
+          {String(this.state.error?.message || "Unknown error")}
+          <button
+            type="button"
+            onClick={() => this.setState({ error: null })}
+            style={{
+              marginLeft: 12,
+              background: "#f59e0b",
+              color: "#111827",
+              border: 0,
+              borderRadius: 8,
+              padding: "4px 10px",
+              cursor: "pointer",
+              fontWeight: 900,
+            }}
+          >
+            Retry
+          </button>
+          <p style={{ margin: "10px 0 0", lineHeight: 1.65 }}>
+            This panel failed independently. The rest of GoldScope should stay usable.
+          </p>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const [settings, setSettings] = useStoredSettings();
   const [tab, setTab] = useState("dashboard");
+  const [tradePlanWorkflowStatus, setTradePlanWorkflowStatus] = useState("ready");
   const [smartRunStatus, setSmartRunStatus] = useState("ready");
   const [aiHistory, setAiHistory] = useState(() => {
     try {
@@ -6970,10 +7288,25 @@ export default function App() {
   const fredWait = Math.max(0, Math.ceil((cooldown.fred - Date.now()) / 1000));
   const filteredNews = newsFilter === "all" ? news : news.filter((n) => n.impact === newsFilter);
 
+  const requestTradePlanBuild = () => {
+    try {
+      setTradePlanWorkflowStatus("queued deterministic trade plan build...");
+      localStorage.setItem("goldscope.pendingTradePlanBuild.v1", JSON.stringify({
+        requestedAt: new Date().toISOString(),
+        source: "dashboard",
+        requiresAi: false,
+      }));
+    } catch {
+      // localStorage may be unavailable; navigation still lets the AI Engine build button work.
+    }
+    setTab("aiEngine");
+  };
+
   const tabs = [
     ["dashboard", "Dashboard"],
     ["analytics", "Analytics"],
     ["alerts", "Alerts"],
+    ["tradePlan", "Trade Targets"],
     ["aiEngine", "AI Analysis"],
     ["settings", "Settings"],
   ];
@@ -6990,35 +7323,6 @@ export default function App() {
 
 
   
-class TechnicalPanelErrorBoundary extends React.Component {
-  constructor(props) {
-    super(props);
-    this.state = { error: null };
-  }
-  static getDerivedStateFromError(error) {
-    return { error };
-  }
-  componentDidCatch(error, info) {
-    console.error("Technical panel render error", error, info);
-  }
-  render() {
-    if (this.state.error) {
-      return (
-        <Card>
-          <Title icon="⚠️" title="Technical panel error" sub="The Technical UI failed to render, but the analysis engine is not affected." />
-          <p style={{ color: C.red, lineHeight: 1.7 }}>
-            {String(this.state.error?.message || this.state.error)}
-          </p>
-          <p style={{ color: C.muted, lineHeight: 1.7 }}>
-            This is a UI-only failure. Report generation, validators, macro logic, employment logic, and BLS parser are unchanged.
-          </p>
-        </Card>
-      );
-    }
-    return this.props.children;
-  }
-}
-
 function TechnicalDashboardPanelBody() {
     const readSnapshot = () => {
       try {
@@ -7516,6 +7820,10 @@ function TechnicalDashboardPanelBody() {
                         if (!candles.length) return;
                         const rect = e.currentTarget.getBoundingClientRect();
                         const x = ((e.clientX - rect.left) / rect.width) * 900;
+                        const y = ((e.clientY - rect.top) / rect.height) * 620;
+                        const inHorizontalPlot = x >= chartX0 && x <= chartX0 + chartW;
+                        const inVerticalChartArea = y >= 24 && y <= 590;
+                        if (!inHorizontalPlot || !inVerticalChartArea) return;
                         const idx = Math.round((x - chartX0) / (chartW / Math.max(candles.length - 1, 1)));
                         setHoverIndex(Math.max(0, Math.min(candles.length - 1, idx)));
                       }}
@@ -7857,6 +8165,10 @@ function TechnicalDashboardPanelBody() {
                           if (!candles.length) return;
                           const rect = e.currentTarget.getBoundingClientRect();
                           const x = ((e.clientX - rect.left) / rect.width) * 900;
+                          const y = ((e.clientY - rect.top) / rect.height) * 620;
+                          const inHorizontalPlot = x >= chartX0 && x <= chartX0 + chartW;
+                          const inVerticalChartArea = y >= 24 && y <= 590;
+                          if (!inHorizontalPlot || !inVerticalChartArea) return;
                           const idx = Math.round((x - chartX0) / (chartW / Math.max(candles.length - 1, 1)));
                           setHoverIndex(Math.max(0, Math.min(candles.length - 1, idx)));
                         }}
@@ -8254,6 +8566,11 @@ function TradeScenarioDashboardPanel() {
   const technical = snapshot?.technicalContext || {};
   const employment = snapshot?.employmentEvent || {};
   const systemState = snapshot?.deterministicScenarioLab?.dominantScenario || snapshot?.deterministicScenarioLab?.dominant || snapshot?.scenario || "Wait-Neutral";
+  const marketSource = snapshot?.marketSource || technical?.marketSource || {};
+  const sourceIsProxy = marketSource?.active && marketSource.active !== "OANDA:XAUUSD";
+  const sourceNote = marketSource?.active === "OANDA:XAUUSD"
+    ? "Trade targets are built from OANDA:XAUUSD spot technical candles."
+    : marketSource?.warning || "Trade targets are based on fallback/proxy data, not exact OANDA:XAUUSD spot.";
 
   const fmt = (value) => {
     if (Array.isArray(value)) return value.map(fmt).join(" → ");
@@ -8304,6 +8621,375 @@ function TradeScenarioDashboardPanel() {
   const scenarioStop = (scenario = {}) => scenario.stopLoss ? fmt(scenario.stopLoss) : "required";
   const scenarioTrigger = (scenario = {}) => scenario.activationTrigger || scenario.trigger || scenario.entryTrigger || scenario.validity || "Trigger confirmation required.";
   const scenarioTargets = (scenario = {}) => Array.isArray(scenario.takeProfit) ? scenario.takeProfit : Array.isArray(scenario.targets) ? scenario.targets : [];
+
+  const parseScenarioNumbers = (value) => {
+    if (value === null || value === undefined) return [];
+    if (Array.isArray(value)) return value.flatMap((item) => parseScenarioNumbers(item)).filter(Number.isFinite);
+    if (typeof value === "number") return Number.isFinite(value) ? [value] : [];
+    const matches = String(value).match(/-?\d+(?:\.\d+)?/g) || [];
+    return matches.map((x) => Number(x)).filter(Number.isFinite);
+  };
+
+  const avgLevel = (values) => {
+    const nums = values.filter(Number.isFinite);
+    return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
+  };
+
+  const pctDistance = (price, level) => {
+    if (!Number.isFinite(price) || !Number.isFinite(level) || level === 0) return null;
+    return ((price - level) / level) * 100;
+  };
+
+  const absPctDistance = (price, level) => {
+    const d = pctDistance(price, level);
+    return Number.isFinite(d) ? Math.abs(d) : null;
+  };
+
+  const nearestLevel = (price, levels = []) => {
+    const nums = levels.map(Number).filter(Number.isFinite);
+    if (!Number.isFinite(price) || !nums.length) return null;
+    return nums
+      .map((level) => ({ level, distancePct: absPctDistance(price, level) }))
+      .filter((x) => Number.isFinite(x.distancePct))
+      .sort((a, b) => a.distancePct - b.distancePct)[0] || null;
+  };
+
+  const normalizeCandleRows = (rows = []) => {
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .map((c, i) => {
+        const open = Number(c.open ?? c.o);
+        const high = Number(c.high ?? c.h);
+        const low = Number(c.low ?? c.l);
+        const close = Number(c.close ?? c.c);
+        const time = c.time ?? c.date ?? c.datetime ?? c.timestamp ?? i;
+        return { open, high, low, close, time };
+      })
+      .filter((c) => [c.open, c.high, c.low, c.close].every(Number.isFinite));
+  };
+
+  const getTimeframeCandlesForAlignment = (tf = {}, tech = {}) => {
+    const rows =
+      (Array.isArray(tf?.candles) && tf.candles) ||
+      (Array.isArray(tf?.ohlc) && tf.ohlc) ||
+      (Array.isArray(tf?.ohlcv) && tf.ohlcv) ||
+      (Array.isArray(tech?.candles) && tech.candles) ||
+      (Array.isArray(tech?.ohlc) && tech.ohlc) ||
+      [];
+    return normalizeCandleRows(rows);
+  };
+
+  const getTechnicalChartContext = (tfKey = "4h") => {
+    const techObj = snapshot?.technicalContext || {};
+    const frames = techObj?.timeframes && typeof techObj.timeframes === "object" ? techObj.timeframes : {};
+    const tf = frames[tfKey] || frames["4h"] || frames["1h"] || frames["1d"] || {};
+    const candles = getTimeframeCandlesForAlignment(tf, techObj);
+    const last = candles[candles.length - 1] || {};
+    const prev = candles[candles.length - 2] || {};
+
+    const lastPrice = Number.isFinite(Number(tf?.lastPrice))
+      ? Number(tf.lastPrice)
+      : Number.isFinite(Number(last?.close))
+        ? Number(last.close)
+        : Number.isFinite(Number(techObj?.lastPrice))
+          ? Number(techObj.lastPrice)
+          : null;
+
+    const ema20 = Number(tf?.ema20);
+    const ema50 = Number(tf?.ema50);
+    const ema200 = Number(tf?.ema200);
+    const supports = Array.isArray(tf?.support) ? tf.support.map(Number).filter(Number.isFinite) : [];
+    const resistances = Array.isArray(tf?.resistance) ? tf.resistance.map(Number).filter(Number.isFinite) : [];
+    const bias = String(tf?.technicalBias || tf?.bias || techObj?.technicalBias || "").toLowerCase();
+    const trend = String(tf?.trend || tf?.trendState || get(techObj, `timeframes.${tfKey}.trend`, "") || "").toLowerCase();
+    const priceVsEma200 = Number.isFinite(lastPrice) && Number.isFinite(ema200)
+      ? lastPrice > ema200 ? "above_ema200" : "below_ema200"
+      : "unknown";
+
+    const lastBody = Number.isFinite(last?.close) && Number.isFinite(last?.open) ? last.close - last.open : 0;
+    const prevBody = Number.isFinite(prev?.close) && Number.isFinite(prev?.open) ? prev.close - prev.open : 0;
+    const candleConfirmation =
+      lastBody > 0 && prevBody < 0 && last.close > prev.open ? "bullish_reversal_candidate" :
+      lastBody < 0 && prevBody > 0 && last.close < prev.open ? "bearish_reversal_candidate" :
+      lastBody > 0 ? "bullish_last_candle" :
+      lastBody < 0 ? "bearish_last_candle" :
+      "neutral";
+
+    const emaAlignment =
+      Number.isFinite(lastPrice) && Number.isFinite(ema20) && Number.isFinite(ema50) && Number.isFinite(ema200)
+        ? lastPrice < ema20 && ema20 < ema50 && ema50 < ema200
+          ? "bearish_stack"
+          : lastPrice > ema20 && ema20 > ema50 && ema50 > ema200
+            ? "bullish_stack"
+            : lastPrice < ema20 && lastPrice < ema50
+              ? "below_short_emas"
+              : lastPrice > ema20 && lastPrice > ema50
+                ? "above_short_emas"
+                : "mixed"
+        : "unknown";
+
+    return {
+      timeframe: tfKey,
+      tf,
+      candles,
+      lastPrice,
+      last,
+      prev,
+      ema20: Number.isFinite(ema20) ? ema20 : null,
+      ema50: Number.isFinite(ema50) ? ema50 : null,
+      ema200: Number.isFinite(ema200) ? ema200 : null,
+      supports,
+      resistances,
+      nearestSupport: nearestLevel(lastPrice, supports),
+      nearestResistance: nearestLevel(lastPrice, resistances),
+      bias,
+      trend,
+      priceVsEma200,
+      emaAlignment,
+      candleConfirmation,
+    };
+  };
+
+  const preferredTimeframeForScenario = (scenario = {}) => {
+    const kind = detectScenarioKind(scenario);
+    if (kind === "sell_on_rebound") return "4h";
+    if (kind === "breakdown_sell") return "1h";
+    if (kind === "support_bounce_buy") return "1h";
+    if (kind === "breakout_buy") return "4h";
+    return "4h";
+  };
+
+  const buildScenarioLevelSummary = (scenario = {}) => {
+    const entryLevels = parseScenarioNumbers(scenario.entryZone || scenario.entryTrigger || scenario.saferEntry);
+    const triggerLevels = parseScenarioNumbers(scenario.activationTrigger || scenario.trigger || scenario.entryTrigger || scenario.validity);
+    const stopLevels = parseScenarioNumbers(scenario.stopLoss);
+    const targetLevels = parseScenarioNumbers(Array.isArray(scenario.takeProfit) ? scenario.takeProfit : Array.isArray(scenario.targets) ? scenario.targets : scenario.takeProfit || scenario.targets);
+
+    return {
+      entryLevels,
+      triggerLevels,
+      stopLevels,
+      targetLevels,
+      entryMid: avgLevel(entryLevels),
+      triggerMid: avgLevel(triggerLevels),
+      stopMid: avgLevel(stopLevels),
+      firstTarget: targetLevels[0] ?? null,
+    };
+  };
+
+  const buildScenarioChartAlignment = (scenario = {}, forcedTimeframe = null) => {
+    const kind = detectScenarioKind(scenario);
+    const preferredTimeframe = forcedTimeframe || preferredTimeframeForScenario(scenario);
+    const ctx = getTechnicalChartContext(preferredTimeframe);
+    const ctx4h = getTechnicalChartContext("4h");
+    const ctx1d = getTechnicalChartContext("1d");
+    const levels = buildScenarioLevelSummary(scenario);
+    const current = ctx.lastPrice;
+
+    const triggerLevel = Number.isFinite(levels.triggerMid) ? levels.triggerMid : levels.entryMid;
+    const entryLevel = Number.isFinite(levels.entryMid) ? levels.entryMid : triggerLevel;
+    const stopLevel = levels.stopMid;
+    const firstTarget = levels.firstTarget;
+
+    const distanceToEntry = Number.isFinite(entryLevel) ? pctDistance(current, entryLevel) : null;
+    const distanceToTrigger = Number.isFinite(triggerLevel) ? pctDistance(current, triggerLevel) : null;
+    const distanceToStop = Number.isFinite(stopLevel) ? pctDistance(current, stopLevel) : null;
+
+    const isBearishTechnical =
+      ctx.bias.includes("bear") ||
+      ctx.emaAlignment === "bearish_stack" ||
+      ctx.emaAlignment === "below_short_emas" ||
+      ctx.priceVsEma200 === "below_ema200";
+
+    const isBullishTechnical =
+      ctx.bias.includes("bull") ||
+      ctx.emaAlignment === "bullish_stack" ||
+      ctx.emaAlignment === "above_short_emas" ||
+      ctx.priceVsEma200 === "above_ema200";
+
+    const nearEntry = Number.isFinite(distanceToEntry) && Math.abs(distanceToEntry) <= 0.65;
+    const nearTrigger = Number.isFinite(distanceToTrigger) && Math.abs(distanceToTrigger) <= 0.45;
+    const belowTrigger = Number.isFinite(current) && Number.isFinite(triggerLevel) && current < triggerLevel;
+    const aboveTrigger = Number.isFinite(current) && Number.isFinite(triggerLevel) && current > triggerLevel;
+
+    let status = "watch";
+    let reason = "Scenario is conditional; wait for chart confirmation.";
+    let invalidationReason = "";
+    let preferredAction = "Wait for trigger confirmation.";
+
+    if (kind === "sell_on_rebound") {
+      if (Number.isFinite(entryLevel) && Number.isFinite(current) && current < entryLevel && isBearishTechnical) {
+        status = nearEntry ? "near_trigger" : "watch";
+        reason = nearEntry
+          ? "Price is approaching the rebound/rejection zone while technical context remains bearish."
+          : "Bearish trend is active, but price is still below the rebound zone; wait for pullback/rejection.";
+        preferredAction = "Watch rebound into entry zone; do not short directly at support.";
+      } else if (nearEntry && ctx.candleConfirmation.includes("bearish")) {
+        status = "near_trigger";
+        reason = "Price is in/near the entry zone with bearish candle confirmation candidate.";
+      }
+      if (Number.isFinite(stopLevel) && Number.isFinite(current) && current > stopLevel) {
+        status = "invalidated";
+        invalidationReason = "Current price is above stop/invalidation zone.";
+      }
+    } else if (kind === "breakdown_sell") {
+      if (belowTrigger && isBearishTechnical) {
+        status = ctx.candleConfirmation.includes("bearish") ? "triggered" : "near_trigger";
+        reason = "Price is below breakdown trigger; confirmation/retest quality should be checked.";
+        preferredAction = "Prefer confirmed close and/or retest rejection before treating it as active.";
+      } else if (nearTrigger || (ctx.nearestSupport?.distancePct ?? 99) <= 0.5) {
+        status = "near_trigger";
+        reason = "Price is near support/breakdown trigger; wait for confirmed break, not only a wick.";
+      } else {
+        status = "watch";
+        reason = "Breakdown setup is directionally aligned but not yet at trigger.";
+      }
+      if (Number.isFinite(stopLevel) && Number.isFinite(current) && current > stopLevel && aboveTrigger) {
+        status = "invalidated";
+        invalidationReason = "Price is above stop / failed-breakdown zone.";
+      }
+    } else if (kind === "support_bounce_buy") {
+      const nearSupport = (ctx.nearestSupport?.distancePct ?? 99) <= 0.65 || nearEntry;
+      if (nearSupport && ctx.candleConfirmation.includes("bullish")) {
+        status = "near_trigger";
+        reason = "Price is near support/entry and bullish candle confirmation is forming.";
+      } else if (nearSupport) {
+        status = "watch";
+        reason = "Counter-trend bounce scenario is near support, but reversal confirmation is still required.";
+      } else {
+        status = "not_active";
+        reason = "Price is not close enough to support/entry for a bounce setup.";
+      }
+      if (isBearishTechnical && !ctx.candleConfirmation.includes("bullish")) {
+        preferredAction = "Counter-trend only; needs reversal candle, RSI/MACD improvement, and no USD/yield pressure.";
+      }
+      if (Number.isFinite(stopLevel) && Number.isFinite(current) && current < stopLevel) {
+        status = "invalidated";
+        invalidationReason = "Current price is below support-bounce invalidation / stop level.";
+      }
+    } else if (kind === "breakout_buy") {
+      if (aboveTrigger && isBullishTechnical) {
+        status = "triggered";
+        reason = "Price is above breakout trigger and technical context is improving.";
+      } else if (nearTrigger && !aboveTrigger) {
+        status = "near_trigger";
+        reason = "Price is near breakout trigger, but clean hold above trigger is still required.";
+      } else if (Number.isFinite(current) && Number.isFinite(triggerLevel) && current < triggerLevel) {
+        status = "not_active";
+        reason = "Price remains below breakout trigger; breakout scenario is remote for now.";
+      }
+      if (Number.isFinite(stopLevel) && Number.isFinite(current) && current < stopLevel && aboveTrigger) {
+        status = "invalidated";
+        invalidationReason = "Breakout failed back below stop/retest invalidation.";
+      }
+    }
+
+    const multiTfBias = {
+      "1h": {
+        bias: getTechnicalChartContext("1h").bias || "unknown",
+        emaAlignment: getTechnicalChartContext("1h").emaAlignment,
+      },
+      "4h": {
+        bias: ctx4h.bias || "unknown",
+        emaAlignment: ctx4h.emaAlignment,
+      },
+      "1d": {
+        bias: ctx1d.bias || "unknown",
+        emaAlignment: ctx1d.emaAlignment,
+      },
+    };
+
+    return {
+      timeframe: preferredTimeframe,
+      preferredTimeframe,
+      status,
+      reason,
+      preferredAction,
+      currentPrice: current,
+      currentPriceDistanceToEntry: distanceToEntry,
+      currentPriceDistanceToStop: distanceToStop,
+      currentPriceDistanceToTrigger: distanceToTrigger,
+      nearestSupport: ctx.nearestSupport,
+      nearestResistance: ctx.nearestResistance,
+      emaAlignment: ctx.emaAlignment,
+      candleConfirmation: ctx.candleConfirmation,
+      invalidationReason,
+      multiTfBias,
+      levels,
+    };
+  };
+
+  const scenarioStatusColor = (status = "") => {
+    const s = String(status).toLowerCase();
+    if (s === "triggered") return C.green;
+    if (s === "near_trigger") return C.gold;
+    if (s === "invalidated") return C.red;
+    if (s === "not_active") return C.muted;
+    return C.blue;
+  };
+
+  const ScenarioAlignmentBadge = ({ alignment }) => {
+    if (!alignment) return null;
+    const color = scenarioStatusColor(alignment.status);
+    return (
+      <span style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        background: `${color}16`,
+        color,
+        border: `1px solid ${color}55`,
+        borderRadius: 999,
+        padding: "5px 9px",
+        fontSize: 11,
+        fontWeight: 950,
+      }}>
+        {String(alignment.status || "watch").replace(/_/g, " ")}
+        <span style={{ color: C.muted }}>· {alignment.preferredTimeframe}</span>
+      </span>
+    );
+  };
+
+  const ScenarioAlignmentPanel = ({ alignment }) => {
+    if (!alignment) return null;
+    const color = scenarioStatusColor(alignment.status);
+    const formatPct = (value) => Number.isFinite(value) ? `${value > 0 ? "+" : ""}${value.toFixed(2)}%` : "n/a";
+    return (
+      <div style={{
+        marginTop: 12,
+        background: "#050b14",
+        border: `1px solid ${color}44`,
+        borderRadius: 14,
+        padding: 12,
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 8 }}>
+          <b style={{ color, fontSize: 12 }}>Chart alignment · {String(alignment.status || "watch").replace(/_/g, " ")}</b>
+          <span style={{ color: C.muted, fontSize: 11 }}>Preferred TF: <b style={{ color: C.text }}>{alignment.preferredTimeframe}</b></span>
+        </div>
+        <p style={{ color: C.muted, fontSize: 12, lineHeight: 1.55, margin: "0 0 9px" }}>{alignment.reason}</p>
+        {alignment.invalidationReason && (
+          <p style={{ color: C.red, fontSize: 12, lineHeight: 1.55, margin: "0 0 9px" }}>Invalidation: {alignment.invalidationReason}</p>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8 }}>
+          <div style={{ color: C.muted, fontSize: 11 }}>Current<br/><b style={{ color: C.text }}>{fmt(alignment.currentPrice)}</b></div>
+          <div style={{ color: C.muted, fontSize: 11 }}>To Entry<br/><b style={{ color: C.text }}>{formatPct(alignment.currentPriceDistanceToEntry)}</b></div>
+          <div style={{ color: C.muted, fontSize: 11 }}>To Trigger<br/><b style={{ color: C.text }}>{formatPct(alignment.currentPriceDistanceToTrigger)}</b></div>
+          <div style={{ color: C.muted, fontSize: 11 }}>EMA<br/><b style={{ color: C.text }}>{String(alignment.emaAlignment || "unknown").replace(/_/g, " ")}</b></div>
+          <div style={{ color: C.muted, fontSize: 11 }}>Candle<br/><b style={{ color: C.text }}>{String(alignment.candleConfirmation || "unknown").replace(/_/g, " ")}</b></div>
+        </div>
+      </div>
+    );
+  };
+
+  const primaryWithAlignment = {
+    ...primary,
+    chartAlignment: buildScenarioChartAlignment(primary),
+  };
+
+  const rankedAlternativesWithAlignment = rankedAlternatives.map((scenario) => ({
+    ...scenario,
+    chartAlignment: buildScenarioChartAlignment(scenario),
+  }));
 
   const MetricBox = ({ label, value, color = C.text }) => (
     <div style={{ background: "#050b14", border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 10px", textAlign: "left", minHeight: 72 }}>
@@ -8357,90 +9043,287 @@ function TradeScenarioDashboardPanel() {
     );
   };
 
-  const ScenarioPathMiniChart = ({ scenario, primaryFlag = false }) => {
+  
+
+const ScenarioPathMiniChart = ({ scenario, primaryFlag = false }) => {
     const kind = detectScenarioKind(scenario);
     const meta = directionMeta(scenario, primaryFlag);
     const stroke = meta.color;
-    const chartData = {
-      sell_on_rebound: {
-        path: "M 18 125 C 62 92, 104 70, 142 82 C 180 96, 222 132, 282 150",
-        label: "Rebound → rejection → lower",
-        trigger: [145, 82],
-        entry: [115, 76],
-        stop: [160, 58],
-        target: [258, 146],
-      },
-      breakdown_sell: {
-        path: "M 18 78 L 98 78 L 135 120 C 157 108, 182 102, 205 118 L 282 154",
-        label: "Range → break → retest → lower",
-        trigger: [135, 120],
-        entry: [190, 108],
-        stop: [112, 64],
-        target: [260, 148],
-      },
-      support_bounce_buy: {
-        path: "M 18 65 C 60 95, 98 132, 137 128 C 178 118, 226 86, 282 76",
-        label: "Support touch → bounce → recovery",
-        trigger: [140, 128],
-        entry: [120, 132],
-        stop: [105, 148],
-        target: [250, 80],
-      },
-      breakout_buy: {
-        path: "M 18 122 L 118 122 L 154 78 C 178 92, 202 92, 225 76 L 282 54",
-        label: "Range → breakout → hold → higher",
-        trigger: [154, 78],
-        entry: [190, 92],
-        stop: [138, 130],
-        target: [260, 60],
-      },
-      neutral: {
-        path: "M 18 104 C 70 88, 112 120, 156 102 C 200 84, 238 122, 282 100",
-        label: "Conditional path",
-        trigger: [150, 103],
-        entry: [120, 115],
-        stop: [95, 135],
-        target: [250, 94],
-      },
-    }[kind] || {
-      path: "M 18 104 C 70 88, 112 120, 156 102 C 200 84, 238 122, 282 100",
-      label: "Conditional path",
-      trigger: [150, 103],
-      entry: [120, 115],
-      stop: [95, 135],
-      target: [250, 94],
+    const targetColor = kind.includes("buy") ? C.green : C.blue;
+
+    const parseNumbers = (value) => {
+      if (value === null || value === undefined) return [];
+      if (Array.isArray(value)) return value.flatMap((item) => parseNumbers(item)).filter(Number.isFinite);
+      if (typeof value === "number") return Number.isFinite(value) ? [value] : [];
+      const matches = String(value).match(/-?\d+(?:\.\d+)?/g) || [];
+      return matches.map((x) => Number(x)).filter(Number.isFinite);
     };
 
-    const Marker = ({ point, label, color }) => (
+    const mean = (arr) => {
+      const nums = arr.filter(Number.isFinite);
+      return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
+    };
+
+    const firstFinite = (...values) => values.find(Number.isFinite) ?? null;
+    const formatLevel = (value) => {
+      if (!Number.isFinite(value)) return "n/a";
+      return Math.abs(value - Math.round(value)) < 0.01 ? String(Math.round(value)) : value.toFixed(1);
+    };
+
+    const entryNums = parseNumbers(scenario.entryZone || scenario.entryTrigger || scenario.saferEntry);
+    const stopNums = parseNumbers(scenario.stopLoss);
+    const triggerNums = parseNumbers(scenario.activationTrigger || scenario.trigger || scenario.entryTrigger || scenario.validity);
+    const targetNums = parseNumbers(
+      Array.isArray(scenario.takeProfit)
+        ? scenario.takeProfit
+        : Array.isArray(scenario.targets)
+          ? scenario.targets
+          : scenario.takeProfit || scenario.targets
+    );
+
+    const currentPrice = Number(scenario?.chartAlignment?.currentPrice);
+    const entryPrice = firstFinite(mean(entryNums), mean(triggerNums), Number(scenario?.chartAlignment?.levels?.entryMid));
+    const stopPrice = firstFinite(mean(stopNums), Number(scenario?.chartAlignment?.levels?.stopMid), entryPrice);
+    const triggerPrice = firstFinite(mean(triggerNums), Number(scenario?.chartAlignment?.levels?.triggerMid), entryPrice);
+    const cleanedTargets = targetNums.filter(Number.isFinite);
+    const fallbackCenter = firstFinite(currentPrice, entryPrice, triggerPrice, stopPrice, cleanedTargets[0], 100);
+
+    const chart = {
+      left: 22,
+      right: 266,
+      top: 34,
+      bottom: 152,
+      axisPanelX: 286,
+      axisPanelW: 124,
+      axisMinY: 36,
+      axisMaxY: 150,
+    };
+
+    const levelValues = [
+      currentPrice,
+      entryPrice,
+      stopPrice,
+      triggerPrice,
+      ...entryNums,
+      ...stopNums,
+      ...triggerNums,
+      ...cleanedTargets,
+    ].filter(Number.isFinite);
+
+    const buildReadableScale = (levels) => {
+      const unique = [...new Set(levels.map((n) => Number(n.toFixed(4))))].sort((a, b) => b - a);
+      if (unique.length <= 1) {
+        return () => (chart.top + chart.bottom) / 2;
+      }
+
+      const minY = chart.top + 8;
+      const maxY = chart.bottom - 8;
+      const spanY = maxY - minY;
+      const gaps = [];
+      for (let i = 0; i < unique.length - 1; i += 1) {
+        gaps.push(Math.max(0.0001, unique[i] - unique[i + 1]));
+      }
+
+      // Compress very large gaps but keep ordered price relationships readable.
+      const weighted = gaps.map((gap) => Math.sqrt(gap));
+      const totalWeight = weighted.reduce((a, b) => a + b, 0) || 1;
+      const minGap = Math.min(17, spanY / Math.max(unique.length + 1, 1));
+      const freeY = Math.max(0, spanY - minGap * gaps.length);
+      const ys = [minY];
+      for (let i = 0; i < gaps.length; i += 1) {
+        ys.push(ys[i] + minGap + (weighted[i] / totalWeight) * freeY);
+      }
+
+      const overflow = ys[ys.length - 1] - maxY;
+      if (overflow > 0) {
+        for (let i = 0; i < ys.length; i += 1) ys[i] -= overflow;
+      }
+
+      const anchors = unique.map((price, i) => ({ price, y: ys[i] }));
+      return (price) => {
+        const safe = Number.isFinite(price) ? price : fallbackCenter;
+        if (safe >= anchors[0].price) return anchors[0].y;
+        if (safe <= anchors[anchors.length - 1].price) return anchors[anchors.length - 1].y;
+        for (let i = 0; i < anchors.length - 1; i += 1) {
+          const a = anchors[i];
+          const b = anchors[i + 1];
+          if (safe <= a.price && safe >= b.price) {
+            const ratio = (a.price - safe) / Math.max(0.0001, a.price - b.price);
+            return a.y + ratio * (b.y - a.y);
+          }
+        }
+        return anchors[anchors.length - 1].y;
+      };
+    };
+
+    const toY = buildReadableScale(levelValues.length ? levelValues : [fallbackCenter - 10, fallbackCenter + 10]);
+    const clampY = (y) => Math.max(chart.top + 4, Math.min(chart.bottom - 4, y));
+
+    const yCurrent = clampY(toY(firstFinite(currentPrice, fallbackCenter)));
+    const yEntry = clampY(toY(entryPrice));
+    const yStop = clampY(toY(stopPrice));
+    const yTrigger = clampY(toY(triggerPrice));
+
+    const targetPoints = cleanedTargets.map((price, index) => ({
+      price,
+      y: clampY(toY(price)),
+      label: index === cleanedTargets.length - 1 ? "Max" : `TP${index + 1}`,
+    }));
+
+    const firstTargetY = targetPoints[0]?.y ?? (kind.includes("buy") ? chart.top + 18 : chart.bottom - 18);
+    const lastTargetY = targetPoints[targetPoints.length - 1]?.y ?? firstTargetY;
+
+    const x = {
+      current: 32,
+      trigger: 112,
+      entry: 160,
+      tp1: 216,
+      tp2: 244,
+      axisStart: chart.axisPanelX - 10,
+    };
+
+    const isBuy = kind === "support_bounce_buy" || kind === "breakout_buy";
+    const isBreak = kind === "breakdown_sell" || kind === "breakout_buy";
+
+    const scenarioLabel = (() => {
+      if (kind === "sell_on_rebound") return "Current → rebound/rejection → entry → targets";
+      if (kind === "breakdown_sell") return "Current → break/retest → entry → targets";
+      if (kind === "support_bounce_buy") return "Current → support/reversal → entry → targets";
+      if (kind === "breakout_buy") return "Current → breakout/hold → entry → targets";
+      return "Current → trigger → entry → targets";
+    })();
+
+    const triggerPoint = (() => {
+      if (kind === "sell_on_rebound") return [x.trigger, yEntry];
+      if (kind === "breakdown_sell") return [x.trigger, yTrigger];
+      if (kind === "support_bounce_buy") return [x.trigger, yTrigger];
+      if (kind === "breakout_buy") return [x.trigger, yTrigger];
+      return [x.trigger, yTrigger];
+    })();
+
+    const entryPoint = (() => {
+      if (kind === "sell_on_rebound") return [x.entry, clampY(yEntry + 8)];
+      if (kind === "breakdown_sell") return [x.entry, clampY(yEntry + 6)];
+      if (kind === "support_bounce_buy") return [x.entry, clampY(yEntry - 6)];
+      if (kind === "breakout_buy") return [x.entry, yEntry];
+      return [x.entry, yEntry];
+    })();
+
+    const currentPoint = [x.current, yCurrent];
+    const stopPoint = [kind.includes("buy") ? 74 : 210, yStop];
+    const targetPoint = [x.tp2, isBuy ? lastTargetY : lastTargetY];
+
+    // Keep the visual path honest: the only pre-trigger movement is from current price to the next required condition.
+    const setupPath = `M ${currentPoint[0]} ${currentPoint[1]} C ${Math.round((currentPoint[0] + triggerPoint[0]) / 2)} ${currentPoint[1]}, ${Math.round((currentPoint[0] + triggerPoint[0]) / 2)} ${triggerPoint[1]}, ${triggerPoint[0]} ${triggerPoint[1]}`;
+    const confirmationPath = `M ${triggerPoint[0]} ${triggerPoint[1]} C ${triggerPoint[0] + 14} ${triggerPoint[1]}, ${entryPoint[0] - 14} ${entryPoint[1]}, ${entryPoint[0]} ${entryPoint[1]}`;
+    const activePath = `M ${entryPoint[0]} ${entryPoint[1]} C ${entryPoint[0] + 34} ${entryPoint[1]}, ${targetPoint[0] - 18} ${targetPoint[1]}, ${targetPoint[0]} ${targetPoint[1]}`;
+
+    const invalidationPath = isBuy
+      ? `M ${triggerPoint[0]} ${triggerPoint[1]} C ${triggerPoint[0] + 28} ${yStop}, ${x.tp1} ${yStop}, ${x.tp2} ${yStop}`
+      : `M ${triggerPoint[0]} ${triggerPoint[1]} C ${triggerPoint[0] + 32} ${yStop}, ${x.tp1} ${yStop}, ${x.tp2} ${yStop}`;
+
+    const axisItemsRaw = [
+      { key: "current", levelY: currentPoint[1], desiredY: currentPoint[1], label: "Now", value: formatLevel(firstFinite(currentPrice, fallbackCenter)), color: C.muted },
+      { key: "stop", levelY: yStop, desiredY: yStop, label: "SL", value: stopNums.length > 1 ? stopNums.map(formatLevel).join(" / ") : formatLevel(stopPrice), color: C.red },
+      { key: "entry", levelY: entryPoint[1], desiredY: entryPoint[1], label: "Entry", value: entryNums.length > 1 ? entryNums.map(formatLevel).join(" / ") : formatLevel(entryPrice), color: stroke },
+      ...targetPoints.map((target, index) => ({
+        key: `target-${index}`,
+        levelY: target.y,
+        desiredY: target.y,
+        label: target.label,
+        value: formatLevel(target.price),
+        color: targetColor,
+      })),
+    ].filter((item) => item.value !== "n/a");
+
+    const distributeAxisLabels = (items) => {
+      const minGap = 17;
+      const sorted = [...items]
+        .map((item) => ({ ...item, labelY: Math.max(chart.axisMinY, Math.min(chart.axisMaxY, item.desiredY)) }))
+        .sort((a, b) => a.labelY - b.labelY);
+      for (let i = 1; i < sorted.length; i += 1) {
+        if (sorted[i].labelY - sorted[i - 1].labelY < minGap) sorted[i].labelY = sorted[i - 1].labelY + minGap;
+      }
+      const overflow = sorted.length ? sorted[sorted.length - 1].labelY - chart.axisMaxY : 0;
+      if (overflow > 0) sorted.forEach((item) => { item.labelY -= overflow; });
+      for (let i = sorted.length - 2; i >= 0; i -= 1) {
+        if (sorted[i + 1].labelY - sorted[i].labelY < minGap) sorted[i].labelY = sorted[i + 1].labelY - minGap;
+      }
+      const underflow = sorted.length ? chart.axisMinY - sorted[0].labelY : 0;
+      if (underflow > 0) sorted.forEach((item) => { item.labelY += underflow; });
+      return sorted;
+    };
+
+    const axisItems = distributeAxisLabels(axisItemsRaw);
+
+    const Marker = ({ point, label, color, radius = 4.2 }) => (
       <g>
-        <circle cx={point[0]} cy={point[1]} r="4.2" fill={color} stroke="#020617" strokeWidth="2" />
-        <text x={point[0] + 7} y={point[1] - 6} fill={color} fontSize="9" fontWeight="800">{label}</text>
+        <circle cx={point[0]} cy={point[1]} r={radius} fill={color} stroke="#020617" strokeWidth="2" />
+        <text x={point[0]} y={point[1] - 9} fill={color} fontSize="8.2" fontWeight="900" textAnchor="middle">{label}</text>
+      </g>
+    );
+
+    const GuideLine = ({ fromX, y, color }) => (
+      <line x1={fromX} y1={y} x2={chart.axisPanelX - 8} y2={y} stroke={color} strokeOpacity="0.24" strokeDasharray="4 5" />
+    );
+
+    const AxisCallout = ({ item }) => (
+      <g>
+        <path
+          d={`M ${chart.axisPanelX - 8} ${item.levelY} C ${chart.axisPanelX + 5} ${item.levelY}, ${chart.axisPanelX + 5} ${item.labelY}, ${chart.axisPanelX + 15} ${item.labelY}`}
+          fill="none"
+          stroke={item.color}
+          strokeOpacity="0.38"
+          strokeWidth="1.1"
+          strokeDasharray={Math.abs(item.levelY - item.labelY) > 4 ? "4 4" : "0"}
+        />
+        <circle cx={chart.axisPanelX - 8} cy={item.levelY} r="2.6" fill={item.color} />
+        <text x={chart.axisPanelX + 24} y={item.labelY - 3} fill={item.color} fontSize="9" fontWeight="900">{item.label}</text>
+        <text x={chart.axisPanelX + 68} y={item.labelY - 3} fill={C.text} fontSize="9" fontWeight="850">{item.value}</text>
       </g>
     );
 
     return (
       <div style={{ background: "#050b14", border: `1px solid ${C.border}`, borderRadius: 16, padding: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 7 }}>
-          <span style={{ color: C.muted, fontSize: 11, fontWeight: 850 }}>Schematic scenario path</span>
-          <span style={{ color: stroke, fontSize: 11, fontWeight: 950 }}>{chartData.label}</span>
+          <span style={{ color: C.muted, fontSize: 11, fontWeight: 850 }}>Scenario level map</span>
+          <span style={{ color: stroke, fontSize: 11, fontWeight: 950 }}>{scenarioLabel}</span>
         </div>
-        <svg viewBox="0 0 300 180" width="100%" height={primaryFlag ? 210 : 180} style={{ display: "block" }}>
-          <defs>
-            <linearGradient id={`scenarioFill-${kind}-${primaryFlag ? "p" : "a"}`} x1="0" x2="1">
-              <stop offset="0%" stopColor={stroke} stopOpacity="0.08" />
-              <stop offset="100%" stopColor={stroke} stopOpacity="0.0" />
-            </linearGradient>
-          </defs>
-          {[40, 80, 120, 160].map((y) => (
-            <line key={y} x1="18" y1={y} x2="282" y2={y} stroke="rgba(148,163,184,.14)" strokeWidth="1" />
+
+        <svg viewBox="0 0 420 180" width="100%" height={primaryFlag ? 210 : 180} style={{ display: "block", background: "rgba(2,6,23,.32)", borderRadius: 12 }}>
+          <rect x={chart.axisPanelX} y="10" width={chart.axisPanelW} height="160" rx="10" fill="rgba(2,6,23,.58)" stroke={C.border} />
+          <text x={chart.axisPanelX + 12} y="27" fill={C.muted} fontSize="10.5" fontWeight="900">Level axis</text>
+
+          {[42, 76, 110, 144].map((y) => (
+            <line key={y} x1={chart.left} y1={y} x2={chart.right} y2={y} stroke="rgba(148,163,184,.14)" strokeWidth="1" />
           ))}
-          <line x1="18" y1="142" x2="282" y2="142" stroke="rgba(148,163,184,.18)" strokeDasharray="5 6" />
-          <path d={chartData.path} fill="none" stroke={stroke} strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
-          <path d={`${chartData.path} L 282 170 L 18 170 Z`} fill={`url(#scenarioFill-${kind}-${primaryFlag ? "p" : "a"})`} />
-          <Marker point={chartData.trigger} label="Trigger" color={C.gold} />
-          <Marker point={chartData.entry} label="Entry" color={stroke} />
-          <Marker point={chartData.stop} label="SL" color={C.red} />
-          <Marker point={chartData.target} label="TP" color={kind.includes("buy") ? C.green : C.blue} />
+
+          <GuideLine fromX={currentPoint[0]} y={currentPoint[1]} color={C.muted} />
+          <GuideLine fromX={stopPoint[0]} y={stopPoint[1]} color={C.red} />
+          <GuideLine fromX={entryPoint[0]} y={entryPoint[1]} color={stroke} />
+          {targetPoints.map((target, index) => <GuideLine key={`guide-target-${index}`} fromX={x.tp2 - 8} y={target.y} color={targetColor} />)}
+
+          <path d={setupPath} fill="none" stroke={stroke} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeOpacity="0.32" strokeDasharray="5 5" />
+          <path d={confirmationPath} fill="none" stroke={stroke} strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round" strokeOpacity="0.70" />
+          <path d={invalidationPath} fill="none" stroke="rgba(148,163,184,.45)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="7 7" />
+          <path d={activePath} fill="none" stroke={stroke} strokeWidth="4.4" strokeLinecap="round" strokeLinejoin="round" />
+
+          <Marker point={currentPoint} label="Now" color={C.muted} radius={3.7} />
+          <Marker point={triggerPoint} label={isBreak ? "Break" : "Trigger"} color={C.gold} />
+          <Marker point={entryPoint} label="Entry" color={stroke} />
+          <Marker point={stopPoint} label="SL" color={C.red} />
+
+          {targetPoints.map((target, index) => {
+            const point = [x.tp2 - 34 + Math.min(index, 3) * 8, target.y];
+            return (
+              <g key={`tp-marker-${index}`}>
+                <circle cx={point[0]} cy={point[1]} r="3.4" fill={targetColor} stroke="#020617" strokeWidth="2" />
+                <text x={point[0]} y={point[1] - 8} fill={targetColor} fontSize="8.2" fontWeight="900" textAnchor="middle">{target.label}</text>
+              </g>
+            );
+          })}
+
+          {axisItems.map((item) => <AxisCallout key={item.key} item={item} />)}
         </svg>
       </div>
     );
@@ -8494,9 +9377,12 @@ function TradeScenarioDashboardPanel() {
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "flex-start", marginBottom: 12 }}>
               <div>
-                <span style={{ display: "inline-block", background: meta.bg, color: meta.color, border: `1px solid ${meta.color}55`, borderRadius: 999, padding: "6px 11px", fontSize: 11, fontWeight: 950 }}>
-                  Primary · Main scenario
-                </span>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <span style={{ display: "inline-block", background: meta.bg, color: meta.color, border: `1px solid ${meta.color}55`, borderRadius: 999, padding: "6px 11px", fontSize: 11, fontWeight: 950 }}>
+                    Primary · Main scenario
+                  </span>
+                  <ScenarioAlignmentBadge alignment={scenario.chartAlignment} />
+                </div>
                 <h2 style={{ color: C.text, margin: "12px 0 0", fontSize: 25, letterSpacing: -0.3 }}>{title}</h2>
               </div>
               <div style={{ color: meta.color, background: meta.bg, borderRadius: 16, width: 52, height: 52, display: "grid", placeItems: "center", fontSize: 30, fontWeight: 950 }}>
@@ -8509,6 +9395,7 @@ function TradeScenarioDashboardPanel() {
             </p>
 
             <ScenarioValueGrid scenario={scenario} primaryFlag />
+            <ScenarioAlignmentPanel alignment={scenario.chartAlignment} />
             {scenario.saferEntry && (
               <p style={{ color: C.blue, fontSize: 12, lineHeight: 1.65, margin: "13px 0 0" }}>
                 Safer entry: <b>{scenario.saferEntry}</b>
@@ -8539,6 +9426,7 @@ function TradeScenarioDashboardPanel() {
               <span style={{ display: "inline-block", background: "#050b14", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 999, padding: "5px 9px", fontSize: 11, fontWeight: 900 }}>
                 {priorityLabel(index)}
               </span>
+              <ScenarioAlignmentBadge alignment={scenario.chartAlignment} />
             </div>
             <h2 style={{ color: C.text, margin: "11px 0 0", fontSize: 21 }}>{title}</h2>
             <p style={{ color: C.muted, fontSize: 12, lineHeight: 1.7, margin: "8px 0 0" }}>
@@ -8561,6 +9449,7 @@ function TradeScenarioDashboardPanel() {
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <ScenarioFlowSteps scenario={scenario} />
             <ScenarioValueGrid scenario={scenario} />
+            <ScenarioAlignmentPanel alignment={scenario.chartAlignment} />
             {scenario.saferEntry && (
               <p style={{ color: C.blue, fontSize: 12, lineHeight: 1.65, margin: 0 }}>
                 Safer entry: <b>{scenario.saferEntry}</b>
@@ -8574,7 +9463,7 @@ function TradeScenarioDashboardPanel() {
     );
   };
 
-  if (!plan || !primary?.name) {
+  if (!plan || !primaryWithAlignment?.name) {
     return (
       <Card>
         <Title icon="🧭" title="Trade Scenario Dashboard" sub="Dynamic panel from snapshot.tradeScenarioPlan" />
@@ -8595,7 +9484,7 @@ function TradeScenarioDashboardPanel() {
             <div>
               <h1 style={{ color: C.text, margin: 0, fontSize: 24 }}>GoldScope Trade Scenario Dashboard</h1>
               <p style={{ color: C.muted, margin: "6px 0 0", fontSize: 13 }}>
-                Timeline Scenario Cards · powered by snapshot.tradeScenarioPlan
+                Trade Targets · deterministic snapshot.tradeScenarioPlan · GC=F proxy levels
               </p>
             </div>
           </div>
@@ -8615,6 +9504,9 @@ function TradeScenarioDashboardPanel() {
               {overlay.reason || "Macro confirmation is incomplete; treat this as conditional research only."}
               {" "}Confirmation required: {Array.isArray(overlay.confirmationRequired) ? overlay.confirmationRequired.join(", ") : "DXY, DGS10, DFII10, CPI, gold reaction"}.
             </p>
+            <p style={{ color: sourceIsProxy ? C.gold : C.green, lineHeight: 1.6, margin: "8px 0 0", fontSize: 12, fontWeight: 850 }}>
+              Market source: {marketSource?.active || "unknown"} · {sourceNote}
+            </p>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
               <Badge value={overlay.employmentSignal || employment?.headline?.surpriseDirection || "employment unknown"}>
                 {overlay.employmentSignal || employment?.headline?.surpriseDirection || "employment unknown"}
@@ -8629,7 +9521,7 @@ function TradeScenarioDashboardPanel() {
         </div>
       </Card>
 
-      <TradeScenarioHeroCard scenario={primary} />
+      <TradeScenarioHeroCard scenario={primaryWithAlignment} />
 
       <Card style={{ background: "#07111f", borderColor: C.border }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 14, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
@@ -8640,12 +9532,12 @@ function TradeScenarioDashboardPanel() {
             </p>
           </div>
           <span style={{ background: "#050b14", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 999, padding: "7px 10px", fontSize: 12, fontWeight: 900 }}>
-            {rankedAlternatives.length} alternatives
+            {rankedAlternativesWithAlignment.length} alternatives
           </span>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 14 }}>
-          {rankedAlternatives.map((scenario, index) => (
+          {rankedAlternativesWithAlignment.map((scenario, index) => (
             <ScenarioTimelineCard key={`${scenario.name || "alt"}-${index}`} scenario={scenario} index={index} />
           ))}
         </div>
@@ -8654,7 +9546,7 @@ function TradeScenarioDashboardPanel() {
       <Card style={{ background: "#050b14", borderColor: C.border }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
           <p style={{ color: C.muted, margin: 0, fontSize: 12 }}>
-            These are approximate proxy levels from GC=F technical context, not exact spot XAUUSD levels.
+            These are approximate proxy levels from GC=F/Yahoo technical context, not the live TradingView XAUUSD spot price.
           </p>
           <p style={{ color: C.gold, margin: 0, fontSize: 12, fontWeight: 950 }}>
             Decision: {String(plan.decision || "do_not_force_trade_until_trigger").replace(/_/g, " ")}
@@ -8844,7 +9736,7 @@ function ProductSummaryCards() {
   );
 }
 
-function ProductDashboardPage({ onNavigate, onRefreshMacroNews }) {
+function ProductDashboardPage({ onNavigate, onRefreshMacroNews, onBuildTradePlan, tradePlanStatus }) {
   const [range, setRange] = useState("1M");
   const summary = getProductMarketSummary();
 
@@ -8856,17 +9748,26 @@ function ProductDashboardPage({ onNavigate, onRefreshMacroNews }) {
         actions={
           <>
             <button style={btn(false)} onClick={() => onRefreshMacroNews?.()}>Refresh macro/news</button>
+            <button style={btn(false)} onClick={() => onBuildTradePlan?.()}>Build Trade Plan</button>
+            <button style={btn(false)} onClick={() => onNavigate?.("tradePlan")}>Open Trade Targets</button>
             <button style={btn(false)} onClick={() => onNavigate?.("analytics")}>Open Analytics</button>
             <button style={btn(false)} onClick={() => onNavigate?.("aiEngine")}>Open AI Analysis</button>
           </>
         }
       />
+      {tradePlanStatus && tradePlanStatus !== "ready" && (
+        <Card style={{ borderColor: String(tradePlanStatus).toLowerCase().includes("fail") ? C.red : C.gold }}>
+          <p style={{ color: String(tradePlanStatus).toLowerCase().includes("fail") ? C.red : C.gold, margin: 0, fontWeight: 850 }}>
+            Trade Plan: {tradePlanStatus}
+          </p>
+        </Card>
+      )}
       <ProductSummaryCards />
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.5fr) minmax(300px, .7fr)", gap: 16, marginTop: 16 }}>
         <Card>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
-            <Title icon="📈" title="Main Price Chart" sub="TradingView OANDA:XAUUSD for the current product shell." />
+            <Title icon="📈" title="Main Price Chart" sub="TradingView XAUUSD for the current product shell." />
             <ProductTimeRangeTabs value={range} onChange={setRange} />
           </div>
           <TradingViewChart />
@@ -8924,8 +9825,12 @@ function ProductAnalyticsPage() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
-        <TechnicalDashboardPanel />
-        <TradeScenarioDashboardPanel />
+        <TechnicalPanelErrorBoundary>
+          <TechnicalDashboardPanel />
+        </TechnicalPanelErrorBoundary>
+        <GeneralErrorBoundary>
+          <TradeScenarioDashboardPanel />
+        </GeneralErrorBoundary>
       </div>
     </div>
   );
@@ -11246,7 +12151,7 @@ function Overview() {
     const [promptMode, setPromptMode] = useState("scenario");
     const [outputDepth, setOutputDepth] = useState("standard");
 
-    const OLLAMA_PROXY = "/api/ollama";
+    const OLLAMA_PROXY = "http://localhost:11434";
 const USE_THINKING_STOP_TOKENS = false; // v2.37.1: optional; keep false to avoid blank/truncated outputs when a model starts with <think>.
 
     const input = {
@@ -11283,21 +12188,32 @@ const USE_THINKING_STOP_TOKENS = false; // v2.37.1: optional; keep false to avoi
       }
     }
 
+    function parseJsonOrThrow(text, label = "response") {
+      if (/^\s*</.test(String(text || ""))) {
+        throw new Error(`${label} returned HTML instead of JSON. This usually means the request hit Vite/React instead of the intended backend.`);
+      }
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new Error(`${label} returned non-JSON: ${String(text || "").slice(0, 180)}`);
+      }
+    }
+
     async function checkProxy() {
-      setProxyStatus("checking internal Vite Ollama proxy...");
-      setAiStatus("checking internal proxy...");
+      setProxyStatus("checking local Ollama...");
+      setAiStatus("checking Ollama...");
       try {
         const res = await fetchWithTimeout(`${OLLAMA_PROXY}/api/tags`, { cache: "no-store" }, 12000);
         const text = await res.text();
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
-        const data = JSON.parse(text);
+        const data = parseJsonOrThrow(text, "Ollama tags");
         const names = Array.isArray(data.models) ? data.models.map((m) => m.name).filter(Boolean) : [];
-        setProxyStatus(names.length ? `internal proxy OK: ${names.length} Ollama model(s)` : "internal proxy OK, but no Ollama models found");
-        setAiStatus("internal proxy OK");
+        setProxyStatus(names.length ? `Ollama OK: ${names.length} Ollama model(s)` : "Ollama OK, but no Ollama models found");
+        setAiStatus("Ollama OK");
         return true;
       } catch (err) {
-        setProxyStatus(`internal proxy failed: ${err.message}`);
-        setAiStatus("internal proxy failed");
+        setProxyStatus(`Ollama check failed: ${err.message}`);
+        setAiStatus("Ollama check failed");
         setAiOutput(`GoldScope internal Ollama proxy is not reachable.
 
 This version does NOT need Start-AI-Proxy.bat.
@@ -11305,11 +12221,11 @@ This version does NOT need Start-AI-Proxy.bat.
 Expected:
 - GoldScope must be started with Start-GoldScope-v2.bat
 - Ollama must be running at http://localhost:11434
-- Vite must proxy /api/ollama -> http://localhost:11434
+- Vite must proxy http://localhost:11434 -> http://localhost:11434
 
 Quick tests:
 1. Open in browser: http://localhost:11434/api/tags
-2. Open in browser while GoldScope is running: http://127.0.0.1:5173/api/ollama/api/tags
+2. Open in browser while GoldScope is running: http://127.0.0.1:5173http://localhost:11434/api/tags
 
 Error:
 ${err.message}`);
@@ -11324,7 +12240,7 @@ ${err.message}`);
         const res = await fetchWithTimeout(`${OLLAMA_PROXY}/api/tags`, { cache: "no-store" }, 12000);
         const text = await res.text();
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
-        const data = JSON.parse(text);
+        const data = parseJsonOrThrow(text, "Ollama tags");
         const names = Array.isArray(data.models) ? data.models.map((m) => m.name).filter(Boolean) : [];
         setModels(names.length ? names : ["qwen3:8b"]);
         if (names.length && !names.includes(model)) setModel(names[0]);
@@ -11334,13 +12250,13 @@ ${err.message}`);
       } catch (err) {
         setOllamaStatus(`Ollama not reachable: ${err.message}`);
         setAiStatus("Ollama not reachable");
-        setAiOutput(`Ollama is not reachable through GoldScope internal proxy.
+        setAiOutput(`Ollama is not reachable directly.
 
 Direct Ollama should answer:
 http://localhost:11434/api/tags
 
 GoldScope internal proxy should answer:
-http://127.0.0.1:5173/api/ollama/api/tags
+http://127.0.0.1:5173http://localhost:11434/api/tags
 
 Error:
 ${err.message}`);
@@ -11654,7 +12570,9 @@ ${err.message}`);
           if (ctx.status === "available") {
             let dailyCandles = [];
             try {
-              if (selected.sourceName === "Yahoo") {
+              if (selected.sourceName === "OANDA") {
+                dailyCandles = await fetchOandaCandles("D", 300);
+              } else if (selected.sourceName === "Yahoo") {
                 dailyCandles = await fetchYahooChart(selected.symbol, "1y", "1d");
               } else if (selected.sourceName === "Stooq") {
                 dailyCandles = await fetchStooqDaily(selected.symbol);
@@ -11700,6 +12618,7 @@ ${err.message}`);
             ok: a.ok,
           })),
         };
+        ctx.marketSource = buildMarketSourceFromTechnicalContext(ctx);
         setTechnicalContext(ctx);
         setTechnicalStatus(ctx.status === "available"
           ? `technical context ready: ${ctx.sourceName}:${ctx.symbol} ${ctx.technicalBias} / ${ctx.technicalConfidence} quality=${ctx.dataQuality?.qualityLabel}`
@@ -11723,6 +12642,17 @@ ${err.message}`);
             qualityScore: 0,
             qualityLabel: "error",
             issues: [err.message],
+          },
+          marketSource: {
+            primary: "OANDA:XAUUSD",
+            instrument: "XAU_USD",
+            sourceType: "unavailable",
+            fallback: "Yahoo:GC=F",
+            active: "none",
+            isProxy: true,
+            lastUpdated: new Date().toISOString(),
+            providerStatus: "error",
+            warning: "No market data source is available.",
           },
         };
         setTechnicalContext(ctx);
@@ -13167,7 +14097,8 @@ function buildGoldScopeContextSnapshot() {
       const snapshot = {
         generatedAt: new Date().toISOString(),
         instrument: "XAUUSD / Gold only",
-        appVersion: "GoldScope v2.41.6.3",
+        primaryMarketSource: "OANDA:XAUUSD",
+        appVersion: "GoldScope v2.41.6.5.8.3",
         deterministicScenarioLab: {
           dominant: scenario?.dominant,
           confidence: scenario?.confidence,
@@ -13187,6 +14118,7 @@ function buildGoldScopeContextSnapshot() {
         replayEvidence: replayCompact,
         employmentEvent,
         technicalContext: maskTechnicalContextForPrompt(technicalContext),
+        marketSource: buildMarketSourceFromTechnicalContext(technicalContext || {}),
         alignmentContext: buildAlignmentContextForSnapshot(scenario.macroDirection, maskTechnicalContextForPrompt(technicalContext)),
         macroGateLanguageHints: buildMacroGateLanguageHints(),
         sourceHealth: normalizeSourceHealth(health),
@@ -13208,6 +14140,74 @@ function buildGoldScopeContextSnapshot() {
     }
 
     
+
+    async function buildAndOpenTradePlan() {
+      setTradePlanWorkflowStatus("building deterministic trade plan...");
+      try {
+        if (!technicalContext || technicalContext.status === "missing" || technicalContext.status === "error") {
+          await loadTechnicalContext();
+        }
+
+        const snapshot = buildGoldScopeContextSnapshot();
+
+        if (!snapshot.tradeScenarioPlan) {
+          snapshot.tradeScenarioPlan = buildGoldTradeScenarioPlan(snapshot);
+        }
+
+        snapshot.generatedBy = "live_trade_plan_workflow";
+        snapshot.tradePlanWorkflow = {
+          builtAt: new Date().toISOString(),
+          requiresAi: false,
+          source: "deterministic buildGoldScopeContextSnapshot + buildGoldTradeScenarioPlan",
+        };
+
+        localStorage.setItem("goldscope.latestSnapshot.v1", JSON.stringify(snapshot));
+        try {
+          window.dispatchEvent(new StorageEvent("storage", { key: "goldscope.latestSnapshot.v1" }));
+        } catch {
+          window.dispatchEvent(new Event("storage"));
+        }
+
+        setContextSnapshot(snapshot);
+        setTradePlanWorkflowStatus("trade plan ready");
+        setTab("tradePlan");
+        return snapshot;
+      } catch (error) {
+        console.error("Build trade plan failed", error);
+        setTradePlanWorkflowStatus(`failed: ${error.message || String(error)}`);
+        return null;
+      }
+    }
+
+
+    useEffect(() => {
+      let cancelled = false;
+      const pendingRaw = (() => {
+        try {
+          return localStorage.getItem("goldscope.pendingTradePlanBuild.v1");
+        } catch {
+          return null;
+        }
+      })();
+
+      if (!pendingRaw) return undefined;
+
+      try {
+        localStorage.removeItem("goldscope.pendingTradePlanBuild.v1");
+      } catch {
+        // ignore
+      }
+
+      Promise.resolve().then(async () => {
+        if (!cancelled) await buildAndOpenTradePlan();
+      });
+
+      return () => {
+        cancelled = true;
+      };
+    }, []);
+
+
 function formatTechnicalNumericFactsForPrompt(snapshot) {
   const tf = snapshot?.technicalContext?.timeframes || {};
   const order = ["1h", "4h", "1d"];
@@ -16485,7 +17485,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadAIRecord() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.6.3",
+        appVersion: "GoldScope v2.41.6.5.8.3",
         provider: "ollama-vite-proxy",
         model,
         promptMode,
@@ -16528,9 +17528,9 @@ ${err.stack || err.message || String(err)}`);
             </span>
           </Card>
 <Card style={{ background: C.card2, borderColor: `${proxyStatus.includes("OK") ? C.green : C.gold}66`, marginBottom: 14 }}>
-            <Title icon="🌉" title="Step 1 - Internal Ollama Proxy" sub="Built into Vite. No separate proxy BAT is needed." />
+            <Title icon="🌉" title="Step 1 - Ollama Connection" sub="Use direct local Ollama. No Vite proxy is needed." />
             <p style={{ color: C.muted, lineHeight: 1.7, marginTop: 0 }}>
-              Only run <code>Start-GoldScope-v2.bat</code>. The app uses Vite internal proxy: <code>/api/ollama</code> → <code>http://localhost:11434</code>.
+              Only run <code>Start-GoldScope-v2.bat</code>. The app connects directly to: <code>http://localhost:11434</code> → <code>http://localhost:11434</code>.
             </p>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
               <Badge value={statusBadge(proxyStatus)}>{proxyStatus}</Badge>
@@ -16765,6 +17765,9 @@ ${err.stack || err.message || String(err)}`);
               <button type="button" disabled={aiRunning} onClick={loadTechnicalContext} style={btn(aiRunning)}>
                 Load technical context
               </button>
+              <button type="button" disabled={aiRunning} onClick={buildAndOpenTradePlan} style={btn(aiRunning)}>
+                Build Trade Plan
+              </button>
               <button type="button" disabled={aiRunning} onClick={refreshPromptPreview} style={btn(aiRunning)}>
                 Preview prompt
               </button>
@@ -16838,7 +17841,7 @@ ${err.stack || err.message || String(err)}`);
     function downloadScenarioSnapshot() {
       const payload = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.6.3",
+        appVersion: "GoldScope v2.41.6.5.8.3",
         type: "scenario-snapshot",
         model,
         scenarioNotes,
@@ -17041,7 +18044,7 @@ ${err.stack || err.message || String(err)}`);
     function makeExportPayload(type = "full") {
       const base = {
         exportedAt: new Date().toISOString(),
-        appVersion: "GoldScope v2.41.6.3",
+        appVersion: "GoldScope v2.41.6.5.8.3",
         prototypeBoundary: "Product UX shell over local browser prototype. Jobs/replay should move to BI/DataOps for production.",
         type,
       };
@@ -17197,7 +18200,7 @@ ${err.stack || err.message || String(err)}`);
 
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <Card>
-            <Title icon="🏗️" title="BI Migration Boundary" sub="What stays in GoldScope vs what moves to BI." />
+            <Title icon="🏗️" title="BI Migration Boundary" sub="What stays in GoldScope v2.41.6.5.8.3 what moves to BI." />
             <div style={{ display: "grid", gap: 10 }}>
               <Card style={{ background: C.card2, borderColor: `${C.green}55` }}>
                 <b style={{ color: C.green }}>Keep in GoldScope UI</b>
@@ -17301,7 +18304,7 @@ ${err.stack || err.message || String(err)}`);
   }
 
   const views = {
-    dashboard: <ProductDashboardPage onNavigate={setTab} onRefreshMacroNews={() => { refreshFred(); refreshGdelt(); }} />,
+    dashboard: <ProductDashboardPage onNavigate={setTab} onRefreshMacroNews={() => { refreshFred(); refreshGdelt(); }} onBuildTradePlan={requestTradePlanBuild} tradePlanStatus={tradePlanWorkflowStatus} />,
     analytics: <ProductAnalyticsPage />,
     alerts: <ProductAlertsPage />,
     control: <ControlCenter />,
@@ -17341,7 +18344,7 @@ ${err.stack || err.message || String(err)}`);
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 26 }}>⚜️</span>
-              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.6.3</strong>
+              <strong style={{ color: C.gold, fontSize: 23 }}>GoldScope v2.41.6.5.8.3</strong>
               <Badge value="warning">Gold-only</Badge>
               <Badge value={health.gdelt.status}>GDELT {health.gdelt.status}</Badge>
               <Badge value={health.fred.status}>FRED {health.fred.status}</Badge>
